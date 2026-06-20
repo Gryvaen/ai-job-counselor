@@ -1,0 +1,40 @@
+{
+  "name": "张三",
+  "email": "zhangsan@example.com",
+  "phone": "13800000000",
+  "education": [
+    {
+      "school": "XX大学",
+      "degree": "本科",
+      "major": "软件工程",
+      "start": "2021-09",
+      "end": "2025-06"
+    }
+  ],
+  "skills": ["C", "Python", "Linux", "STM32", "Git", "Makefile"],
+  "projects": [
+    {
+      "name": "bsp_lab",
+      "description": "基于 Linux 完成 I2C 温湿度传感器 platform 驱动移植",
+      "skills": ["Linux", "C", "I2C", "platform driver", "Device Tree"],
+      "evidence": "projects/bsp_lab.md"
+    }
+  ],
+  "experience": [
+    {
+      "company": "XX科技",
+      "role": "嵌入式软件实习生",
+      "start": "2024-07",
+      "end": "2024-09",
+      "bullets": [
+        "负责 STM32 GPIO/I2C 驱动开发与调试"
+      ]
+    }
+  ],
+  "preferences": {
+    "city": "上海",
+    "min_salary": "8k",
+    "target_roles": ["嵌入式", "BSP", "Linux驱动"],
+    "keywords": ["Linux驱动", "BSP", "嵌入式软件"]
+  }
+}

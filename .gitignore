@@ -1,0 +1,8 @@
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+data/boss_state.json
+data/jobmatch.db
+storage/vector_store
+data/resume_versions/
