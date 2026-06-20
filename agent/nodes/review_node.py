@@ -29,4 +29,4 @@ def review_node(state: AgentState) -> dict:
 
     passed = [r for r in resumes if r.job_id not in failed_ids]
     print(f"[review] {len(passed)}/{len(resumes)} resumes passed, {len(failed_ids)} flagged")
-    return state
+    return {"optimized_resumes": resumes}

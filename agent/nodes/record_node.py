@@ -3,7 +3,14 @@ from models.agent_state import AgentState
 from models.job import Job
 from models.match import MatchResult
 from config.settings import settings
-from storage.db import get_engine, get_session, save_job, save_match, Base
+from storage.db import (
+    get_engine,
+    get_session,
+    save_job,
+    save_learning_plan,
+    save_match,
+    save_resume_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +30,17 @@ def record_node(state: AgentState) -> dict:
                 if job:
                     save_job(session, job)
                 save_match(session, result)
+            for resume in state.get("optimized_resumes", []):
+                save_resume_version(session, resume)
+            for plan in state.get("learning_plans", []):
+                save_learning_plan(session, plan)
             session.commit()
 
-        print(f"[record_node] Saved {len(match_results)} match results to {settings.db_path}")
+        print(
+            f"[record_node] Saved {len(match_results)} match results, "
+            f"{len(state.get('optimized_resumes', []))} resumes, "
+            f"{len(state.get('learning_plans', []))} plans to {settings.db_path}"
+        )
     except Exception as e:
         logger.warning(f"Failed to persist match results: {e}")
 

@@ -2,12 +2,30 @@
 RAG Retriever — queries Chroma vector store for job-related knowledge.
 """
 
-from pathlib import Path
 import hashlib
+from pathlib import Path
 
 import chromadb
+from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from openai import OpenAI
+
 from config.settings import settings
+
+
+class OpenAIEmbeddingFunction(EmbeddingFunction[Documents]):
+    """Chroma-compatible embedding adapter for current Chroma releases."""
+
+    def __init__(self, api_key: str, base_url: str | None, model: str):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
+
+    def __call__(self, input: Documents) -> Embeddings:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for RAG embeddings.")
+        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        resp = client.embeddings.create(input=list(input), model=self.model)
+        return [r.embedding for r in resp.data]
 
 
 class RAGRetriever:
@@ -23,11 +41,11 @@ class RAGRetriever:
     def _get_embed_fn(self):
         """Lazy-load embedding function."""
         if self._embed_fn is None:
-            def embed_fn(texts: list[str]) -> list[list[float]]:
-                client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-                resp = client.embeddings.create(input=texts, model=settings.openai_embedding_model)
-                return [r.embedding for r in resp.data]
-            self._embed_fn = embed_fn
+            self._embed_fn = OpenAIEmbeddingFunction(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.openai_embedding_model,
+            )
         return self._embed_fn
 
     def _get_client(self):
@@ -40,7 +58,10 @@ class RAGRetriever:
         client = self._get_client()
         if self._collection is None:
             try:
-                self._collection = client.get_collection(self.collection_name)
+                self._collection = client.get_collection(
+                    self.collection_name,
+                    embedding_function=self._get_embed_fn(),
+                )
             except Exception:
                 self._collection = client.create_collection(
                     name=self.collection_name,

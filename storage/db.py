@@ -139,6 +139,26 @@ def save_notification(session: Session, job_id: str, payload: dict, channel: str
     session.add(record)
 
 
+def save_resume_version(session: Session, resume, file_path: str = "", status: str = "draft") -> None:
+    record = ResumeVersionRecord(
+        job_id=resume.job_id,
+        file_path=file_path,
+        content_md=resume.full_markdown,
+        status=status,
+    )
+    session.add(record)
+
+
+def save_learning_plan(session: Session, plan) -> None:
+    record = LearningPlanRecord(
+        job_id=plan.job_id,
+        priority_skills=json.dumps(plan.priority_skills, ensure_ascii=False),
+        weekly_plan=json.dumps(plan.weekly_plan, ensure_ascii=False),
+        estimated_hours=plan.estimated_hours,
+    )
+    session.add(record)
+
+
 def get_cached_job_ids(session: Session) -> set[str]:
     """Return all job IDs already in DB for deduplication."""
     rows = session.query(JobRecord.id).all()

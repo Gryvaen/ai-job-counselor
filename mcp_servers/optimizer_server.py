@@ -11,7 +11,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastmcp import FastMCP
 from config.settings import settings
-from crews.resume_optimizer import optimize_for_job, list_versions, save_resume_version
+from crews.resume_optimizer import (
+    list_versions as list_resume_versions,
+    optimize_for_job as build_optimized_resume,
+    save_resume_version,
+)
 
 mcp = FastMCP("jobmatch-optimizer", port=8004)
 
@@ -45,7 +49,7 @@ def optimize_for_job(job_id: str, company: str, title: str, description: str,
         rag_evidence=[], reasoning="",
     )
 
-    resume = optimize_for_job(job, match)
+    resume = build_optimized_resume(job, match)
     path = save_resume_version(resume)
     result = resume.model_dump()
     result["saved_path"] = str(path)
@@ -59,7 +63,7 @@ def list_versions() -> list[dict]:
     Returns:
         List of version info dicts
     """
-    return list_versions()
+    return list_resume_versions()
 
 
 @mcp.tool()

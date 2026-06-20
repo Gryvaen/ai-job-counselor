@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-项目处于 **Phase 1** 开发阶段，已实现的部分：
+项目已具备可运行的端到端闭环：
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
@@ -13,10 +13,10 @@
 | `scraper/` | ✅ | Playwright 爬虫，支持 cookie 登录持久化 |
 | `storage/` | ✅ | SQLAlchemy SQLite 持久化 |
 | `notifier/` | ✅ | 飞书 Webhook 消息推送 |
-| `rag/` | ✅ 基础 | Chroma 向量检索 + OpenAI Embedding，未接入匹配节点 |
-| `agent/` | ✅ 管线 | LangGraph StateGraph (scrape → match → notify/record) |
-| `crewai/` | ❌ | 简历优化多 Agent Crew 尚未实现 |
-| `mcp_servers/` | ❌ | 5 个 MCP Server 尚未实现 |
+| `rag/` | ✅ | Chroma 向量检索 + OpenAI Embedding，已接入匹配证据 |
+| `agent/` | ✅ | LangGraph StateGraph (plan → scrape → retrieve → match → optimize → review → notify → record) |
+| `crews/` | ✅ 基础 | 简历优化与学习计划生成，保留证据/待核实标记 |
+| `mcp_servers/` | ✅ | boss / rag / resume / optimizer / feishu 五个 MCP Server |
 
 ## 快速开始
 
@@ -129,10 +129,10 @@ Jobs notified: 3
 ### 7. CLI 其他命令
 
 ```bash
-# 交互聊天模式（待实现）
+# 交互命令模式
 .venv/bin/python main.py chat
 
-# 查看某个岗位的 RAG 可解释性分析（待实现）
+# 查看某个岗位的匹配、RAG 证据、简历草稿和学习计划
 .venv/bin/python main.py explain abc123
 ```
 
@@ -193,15 +193,18 @@ ai_agent/
 ## 流水线架构
 
 ```
-scrape → match → (condition: score >= threshold?)
-                    ├─ YES → notify → record
-                    └─ NO  → record
+plan → scrape → retrieve → match → (condition: score >= threshold?)
+                              ├─ YES → optimize → review → notify → record
+                              └─ NO  → record
 ```
 
 - **scrape**: Playwright 搜索 Boss 直聘 → 提取 Job 列表 → 去重
-- **match**: 基于关键词规则评分（Phase 2 接入 RAG）→ 生成 MatchResult
+- **retrieve**: 对每个岗位检索个人知识库，生成岗位级证据
+- **match**: 结合搜索词、JD 关键词、简历技能、RAG 证据生成 MatchResult
+- **optimize**: 为高分岗位生成定制简历草稿与学习计划
+- **review**: 标记低置信度内容和 ATS 覆盖率风险
 - **notify**: score >= threshold 的岗位推送飞书
-- **record**: 所有岗位 + 匹配结果写入 SQLite
+- **record**: 岗位、匹配结果、简历草稿、学习计划写入 SQLite
 
 ## 集成测试
 
@@ -218,9 +221,9 @@ scrape → match → (condition: score >= threshold?)
 | 阶段 | 目标 | 交付物 |
 |------|------|--------|
 | Phase 1 (✅ 已完成) | 采集 + 基础匹配 + 飞书推送 + SQLite | 端到端管线 |
-| Phase 2 | RAG 增强匹配 | retrieve_node 接入 match_node |
-| Phase 3 | LangGraph 全流程 + MCP Server | 5 个 MCP Server + chat 模式 |
-| Phase 4 | CrewAI 简历优化 + 学习计划 | optimize_node + review_node + 版本管理 |
+| Phase 2 (✅ 已完成) | RAG 增强匹配 | retrieve_node 接入 match_node |
+| Phase 3 (✅ 已完成) | LangGraph 全流程 + MCP Server | 5 个 MCP Server + chat/explain 模式 |
+| Phase 4 (✅ 基础完成) | 简历优化 + 学习计划 | optimize_node + review_node + 版本管理 |
 
 ## 安全注意
 
