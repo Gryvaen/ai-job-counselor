@@ -1,0 +1,41 @@
+services:
+  webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jobmatch-webui
+    ports:
+      - "${WEBUI_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama}
+      RESUME_PATH: ${RESUME_PATH:-data/resume.json}
+      BOSS_STATE_PATH: ${BOSS_STATE_PATH:-data/boss_state.json}
+      KNOWLEDGE_DIR: ${KNOWLEDGE_DIR:-data/knowledge}
+      RESUME_VERSIONS_DIR: ${RESUME_VERSIONS_DIR:-data/resume_versions}
+      DB_PATH: ${DB_PATH:-data/jobmatch.db}
+      CHROMA_DIR: ${CHROMA_DIR:-storage/vector_store}
+    volumes:
+      - ./data:/app/data
+      - ./storage:/app/storage
+      - ./.env:/app/.env
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jobmatch-ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_models:

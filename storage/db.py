@@ -81,13 +81,16 @@ class LearningPlanRecord(Base):
 # ---------------------------------------------------------------------------
 
 _engine = None
+_engine_path = None
 _session_factory = None
 
 
 def get_engine(db_path: Path | str) -> Any:
-    global _engine, _session_factory
-    if _engine is None:
-        _engine = create_engine(f"sqlite:///{db_path}", echo=False)
+    global _engine, _engine_path, _session_factory
+    normalized_path = str(Path(db_path))
+    if _engine is None or _engine_path != normalized_path:
+        _engine = create_engine(f"sqlite:///{normalized_path}", echo=False)
+        _engine_path = normalized_path
         _session_factory = sessionmaker(bind=_engine)
         Base.metadata.create_all(_engine)
     return _engine

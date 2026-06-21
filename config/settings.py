@@ -13,11 +13,19 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
+    # Provider
+    model_provider: str = "openai"  # openai / ollama / deepseek-compatible
+
     # LLM
     openai_api_key: str = ""
     openai_base_url: str | None = None
     openai_model: str = "gpt-4o-mini"
     openai_embedding_model: str = "text-embedding-3-small"
+
+    # Ollama OpenAI-compatible API
+    ollama_base_url: str = "http://127.0.0.1:11434/v1"
+    ollama_model: str = "qwen2.5:7b"
+    ollama_embedding_model: str = "nomic-embed-text"
 
     # Feishu
     feishu_webhook: str = ""

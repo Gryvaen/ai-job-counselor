@@ -28,6 +28,14 @@ class OpenAIEmbeddingFunction(EmbeddingFunction[Documents]):
         return [r.embedding for r in resp.data]
 
 
+def embedding_config() -> tuple[str, str | None, str]:
+    """Return api_key, base_url, model for the selected embedding provider."""
+    provider = settings.model_provider.lower().strip()
+    if provider == "ollama":
+        return "ollama", settings.ollama_base_url, settings.ollama_embedding_model
+    return settings.openai_api_key, settings.openai_base_url, settings.openai_embedding_model
+
+
 class RAGRetriever:
     """Retrieve relevant knowledge base snippets using Chroma + OpenAI embeddings."""
 
@@ -42,9 +50,7 @@ class RAGRetriever:
         """Lazy-load embedding function."""
         if self._embed_fn is None:
             self._embed_fn = OpenAIEmbeddingFunction(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-                model=settings.openai_embedding_model,
+                *embedding_config(),
             )
         return self._embed_fn
 

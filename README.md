@@ -136,6 +136,27 @@ Jobs notified: 3
 .venv/bin/python main.py explain abc123
 ```
 
+### 8. Web 操作台
+
+启动本地前端工作台：
+
+```bash
+.venv/bin/uvicorn api.server:app --host 127.0.0.1 --port 8000
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:8000
+```
+
+Web 端支持：
+
+- 输入技能、目标岗位、联系方式，生成 Markdown 简历模板
+- 传入 GitHub 个人主页，自动读取公开仓库并转成项目经历证据
+- 自动提示岗位能力缺口
+- 一键复制/下载简历，生成版本保存到 `data/resume_versions/`
+
 ## 项目结构
 
 ```
@@ -168,6 +189,9 @@ ai_agent/
 ├── scripts/
 │   ├── login_boss.py            # Boss 登录辅助
 │   └── ingest_knowledge.py      # RAG 知识库入库脚本
+├── api/
+│   ├── server.py                # FastAPI Web 操作台
+│   └── static/                  # 前端页面、样式、交互
 ├── data/
 │   ├── resume.json              # 简历主档案 (手动维护)
 │   ├── resume.json.template     # 简历模板
@@ -214,6 +238,44 @@ plan → scrape → retrieve → match → (condition: score >= threshold?)
 .venv/bin/python tests/test_mock_pipeline.py   # Mock 数据 → 匹配 → 存储
 .venv/bin/python tests/test_full_graph.py      # 完整 LangGraph 流程
 .venv/bin/python tests/test_notify_path.py     # 验证 notify 分支被触发
+```
+
+## Docker + Ollama 本地模型
+
+项目提供 `docker-compose.yml`，会启动两个服务：
+
+- `webui`: JobMatch WebUI，默认暴露到 `http://127.0.0.1:8000`
+- `ollama`: 本地模型服务，WebUI 通过 `http://ollama:11434/v1` 调用
+
+首次启动：
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+拉取推荐模型：
+
+```bash
+docker compose exec ollama ollama pull qwen2.5:7b
+docker compose exec ollama ollama pull nomic-embed-text
+```
+
+在 WebUI 的「设置」页选择：
+
+```text
+模型提供商: 本地 Ollama
+Ollama Base URL: http://ollama:11434/v1
+Ollama Chat Model: qwen2.5:7b
+Ollama Embedding Model: nomic-embed-text
+```
+
+常用命令：
+
+```bash
+docker compose logs -f webui
+docker compose restart webui
+docker compose down
 ```
 
 ## 开发计划

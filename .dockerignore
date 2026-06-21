@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+data/boss_state.json
+data/jobmatch.db
+data/resume_versions
+storage/vector_store
+jobmatch_agent.egg-info

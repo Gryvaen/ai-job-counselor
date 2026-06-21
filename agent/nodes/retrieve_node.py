@@ -11,7 +11,7 @@ def retrieve_node(state: AgentState) -> dict:
     jobs = state.get("jobs", [])
     if not jobs:
         return {"retrieved_context": []}
-    if not settings.openai_api_key:
+    if settings.model_provider.lower().strip() != "ollama" and not settings.openai_api_key:
         print("[agent/retrieve] OPENAI_API_KEY not configured; skipping RAG retrieval.")
         return {"retrieved_context": []}
 
