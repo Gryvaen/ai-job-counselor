@@ -6,6 +6,9 @@ const state = {
   versions: [],
   selectedJobId: null,
   selectedVersionId: null,
+  commands: [],
+  activeTaskId: null,
+  taskPollTimer: null,
 };
 
 const titles = {
@@ -86,9 +89,34 @@ async function checkHealth() {
   renderSettings();
 }
 
+async function loadCommands() {
+  try {
+    const data = await api("/api/commands");
+    state.commands = data.commands || [];
+    renderCommandHints();
+  } catch (error) {
+    state.commands = [];
+  }
+}
+
+function renderCommandHints() {
+  const container = $("#commandHints");
+  if (!container || !state.commands.length) return;
+  container.innerHTML = state.commands
+    .slice(0, 6)
+    .map((command) => `
+      <button class="prompt-chip" type="button" data-command="${escapeAttr(command.name)}">
+        <strong>${escapeHtml(command.name)}</strong>
+        <span>${escapeHtml(command.usage || command.name)}</span>
+      </button>
+    `)
+    .join("");
+}
+
 async function loadConfig() {
   const config = await api("/api/config");
   state.config = config;
+  await renderModelOptions(config);
   renderConfigForm(config);
   renderSettings();
 }
@@ -101,6 +129,65 @@ function renderConfigForm(config) {
       form.elements[key].value = value ?? "";
     }
   });
+}
+
+async function renderModelOptions(config) {
+  renderStaticModelOptions(config);
+  if ((config.model_provider || "openai") !== "ollama") return;
+
+  try {
+    const params = new URLSearchParams({
+      provider: "ollama",
+      base_url: config.ollama_base_url || "",
+    });
+    const data = await api(`/api/models?${params.toString()}`);
+    setSelectOptions("ollama_model", data.chat_models || [], config.ollama_model, [
+      "qwen2.5-coder:7b",
+      "qwen2.5:7b",
+      "llama3.1:8b",
+    ]);
+    setSelectOptions("ollama_embedding_model", data.embedding_models || [], config.ollama_embedding_model, [
+      "nomic-embed-text",
+      "mxbai-embed-large",
+    ]);
+    if (data.warning) showNotice(data.warning);
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
+}
+
+function renderStaticModelOptions(config) {
+  setSelectOptions("openai_model", [
+    "gpt-4o-mini",
+    "gpt-4o",
+    "deepseek-chat",
+    "deepseek-reasoner",
+    "qwen-plus",
+    "qwen-turbo",
+  ], config.openai_model);
+  setSelectOptions("openai_embedding_model", [
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+  ], config.openai_embedding_model);
+  setSelectOptions("ollama_model", [], config.ollama_model, [
+    "qwen2.5-coder:7b",
+    "qwen2.5:7b",
+    "llama3.1:8b",
+  ]);
+  setSelectOptions("ollama_embedding_model", [], config.ollama_embedding_model, [
+    "nomic-embed-text",
+    "mxbai-embed-large",
+  ]);
+}
+
+function setSelectOptions(name, primaryOptions, selectedValue, fallbackOptions = []) {
+  const select = $(`#configForm [name="${name}"]`);
+  if (!select) return;
+  const values = [...new Set([...(primaryOptions || []), selectedValue, ...(fallbackOptions || [])].filter(Boolean))];
+  select.innerHTML = values
+    .map((value) => `<option value="${escapeAttr(value)}">${escapeHtml(value)}</option>`)
+    .join("");
+  select.value = selectedValue || values[0] || "";
 }
 
 async function saveConfig(event) {
@@ -233,33 +320,139 @@ async function runSearch(event) {
   const form = event.currentTarget;
   const button = $("#searchBtn");
   const output = $("#searchResult");
-  setBusy(button, true, "搜索中...");
-  output.textContent = "正在调用 Boss 搜索、RAG 检索、匹配评分和简历优化。这个步骤可能需要一些时间。";
+  setBusy(button, true, "启动中...");
+  output.textContent = "正在创建后台搜索任务。";
   try {
-    const result = await api("/api/jobs/search", {
+    const task = await api("/api/jobs/search/tasks", {
       method: "POST",
       body: JSON.stringify({
         keywords: form.keywords.value,
+        city: form.city.value || "全国",
         threshold: Number(form.threshold.value || 75),
       }),
     });
-    output.innerHTML = `
-      <strong>${escapeHtml(result.message)}</strong><br>
-      抓取岗位: ${result.jobs_scraped}<br>
-      完成匹配: ${result.matches_scored}<br>
-      生成简历: ${result.resumes_generated}<br>
-      通知数量: ${result.notified}
-    `;
-    state.jobs = result.jobs || [];
-    renderJobList($("#jobList"), state.jobs);
-    await loadDashboard();
-    switchView("matches");
+    showNotice(task.message || "搜索任务已启动");
+    startTaskPolling(task.task_id);
   } catch (error) {
     output.textContent = error.message;
     showNotice(error.message, "error");
-  } finally {
     setBusy(button, false);
+    return;
+  } finally {
+    if (!state.activeTaskId) setBusy(button, false);
   }
+}
+
+function startTaskPolling(taskId) {
+  state.activeTaskId = taskId;
+  if (state.taskPollTimer) clearTimeout(state.taskPollTimer);
+  pollTask(taskId);
+}
+
+async function pollTask(taskId) {
+  try {
+    const task = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
+    renderTask(task);
+    if (task.status === "completed") {
+      await finishTask(task);
+      return;
+    }
+    if (task.status === "failed") {
+      failTask(task);
+      return;
+    }
+    state.taskPollTimer = setTimeout(() => pollTask(taskId), 1200);
+  } catch (error) {
+    showNotice(error.message, "error");
+    state.taskPollTimer = setTimeout(() => pollTask(taskId), 2500);
+  }
+}
+
+async function finishTask(task) {
+  const result = task.result || {};
+  state.activeTaskId = null;
+  if (state.taskPollTimer) clearTimeout(state.taskPollTimer);
+  state.taskPollTimer = null;
+  state.jobs = result.jobs || [];
+  renderTask(task);
+  renderJobList($("#jobList"), state.jobs);
+  await loadDashboard();
+  await loadJobs();
+  setBusy($("#searchBtn"), false);
+  appendMessage("agent", `${result.message || "搜索完成"} 抓取 ${result.jobs_scraped || 0} 个岗位，匹配 ${result.matches_scored || 0} 个。`);
+  switchView("matches");
+}
+
+function failTask(task) {
+  state.activeTaskId = null;
+  if (state.taskPollTimer) clearTimeout(state.taskPollTimer);
+  state.taskPollTimer = null;
+  renderTask(task);
+  setBusy($("#searchBtn"), false);
+  showNotice(task.message || "搜索任务失败", "error");
+  appendMessage("agent", task.message || "搜索任务失败");
+}
+
+function renderTask(task) {
+  const html = taskHtml(task);
+  const searchResult = $("#searchResult");
+  const activePanel = $("#activeTaskPanel");
+  if (searchResult) searchResult.innerHTML = html;
+  if (activePanel) {
+    activePanel.innerHTML = html;
+    activePanel.classList.remove("hidden");
+    if (task.status === "completed" || task.status === "failed") {
+      setTimeout(() => activePanel.classList.add("hidden"), 8000);
+    }
+  }
+}
+
+function taskHtml(task) {
+  const events = task.events || [];
+  const result = task.result || {};
+  const statusText = {
+    queued: "排队中",
+    running: "运行中",
+    completed: "已完成",
+    failed: "失败",
+  }[task.status] || task.status;
+  return `
+    <div class="task-card" data-status="${escapeAttr(task.status)}">
+      <div class="task-head">
+        <div>
+          <strong>${escapeHtml(statusText)} · ${escapeHtml(task.message || "")}</strong>
+          <span>${escapeHtml((task.request?.city || "全国"))} · ${escapeHtml((task.request?.keywords || []).join(", "))}</span>
+        </div>
+        <span class="task-percent">${Number(task.progress || 0)}%</span>
+      </div>
+      <div class="progress-track"><span style="width:${Number(task.progress || 0)}%"></span></div>
+      ${task.login_screenshot ? `
+        <div class="login-qr">
+          <img src="data:image/png;base64,${escapeAttr(task.login_screenshot)}" alt="Boss 登录二维码" />
+          <div>
+            <strong>扫码登录 Boss</strong>
+            <p>请用 Boss 直聘 App 扫码。登录成功后，Agent 会自动继续搜索，不需要再次提交。</p>
+          </div>
+        </div>
+      ` : ""}
+      <div class="task-events">
+        ${events.map((event) => `
+          <div class="task-event ${event.stage === task.stage ? "active" : ""}">
+            <span>${escapeHtml(String(event.progress))}%</span>
+            <p>${escapeHtml(event.message)}</p>
+          </div>
+        `).join("")}
+      </div>
+      ${task.status === "completed" ? `
+        <div class="task-summary">
+          <span>岗位 ${Number(result.jobs_scraped || 0)}</span>
+          <span>匹配 ${Number(result.matches_scored || 0)}</span>
+          <span>简历 ${Number(result.resumes_generated || 0)}</span>
+          <span>通知 ${Number(result.notified || 0)}</span>
+        </div>
+      ` : ""}
+    </div>
+  `;
 }
 
 async function loadJobs() {
@@ -439,12 +632,108 @@ async function sendChat(event) {
       body: JSON.stringify({ message: text }),
     });
     appendMessage("agent", result.reply);
-    if (result.action === "suggest_search" && result.data.keywords) {
-      $("#searchForm").keywords.value = result.data.keywords;
-    }
+    await handleChatAction(result);
   } catch (error) {
     appendMessage("agent", error.message);
+  } finally {
+    hideCommandMenu();
   }
+}
+
+async function handleChatAction(result) {
+  const data = result.data || {};
+  if ((result.action === "suggest_search" || result.action === "search_complete" || result.action === "search_started") && data.keywords) {
+    $("#searchForm").keywords.value = data.keywords;
+    if ($("#searchForm").city) $("#searchForm").city.value = data.city || "全国";
+    if ($("#searchForm").threshold) $("#searchForm").threshold.value = data.threshold || 75;
+  }
+  if (result.action === "search_started" && data.task_id) {
+    startTaskPolling(data.task_id);
+  }
+  if (result.action === "search_complete") {
+    state.jobs = data.jobs || [];
+    renderJobList($("#jobList"), state.jobs);
+    await loadDashboard();
+    switchView("matches");
+  }
+  if (result.action === "dashboard") {
+    await loadDashboard();
+    switchView("dashboard");
+  }
+  if (result.action === "navigate" && data.view) {
+    switchView(data.view);
+  }
+  if (result.action === "resume_advice" && data.target_role) {
+    switchView("profile");
+    const template = $("#templateForm");
+    if (template?.target_role) template.target_role.value = data.target_role;
+  }
+}
+
+function updateCommandMenu() {
+  const input = $("#chatForm").message;
+  const menu = $("#commandMenu");
+  if (!input || !menu) return;
+  const value = input.value;
+  updateCommandParams(value);
+  if (!value.startsWith("/")) {
+    hideCommandMenu();
+    return;
+  }
+
+  const needle = value.slice(1).split(/\s+/, 1)[0].toLowerCase();
+  const matches = state.commands.filter((command) =>
+    command.name.slice(1).toLowerCase().startsWith(needle)
+  );
+  if (!matches.length) {
+    hideCommandMenu();
+    return;
+  }
+
+  menu.innerHTML = matches
+    .map((command) => `
+      <button class="command-option" type="button" data-command="${escapeAttr(command.name)}">
+        <span>
+          <strong>${escapeHtml(command.usage || command.name)}</strong>
+          <small>${escapeHtml(command.description)}</small>
+        </span>
+        <kbd>${escapeHtml(command.label)}</kbd>
+      </button>
+    `)
+    .join("");
+  menu.classList.remove("hidden");
+}
+
+function hideCommandMenu() {
+  const menu = $("#commandMenu");
+  if (menu) menu.classList.add("hidden");
+}
+
+function updateCommandParams(value = "") {
+  const params = $("#commandParams");
+  if (!params) return;
+  const commandName = value.trimStart().split(/\s+/, 1)[0];
+  const command = state.commands.find((item) => item.name === commandName);
+  if (!command || !command.params) {
+    params.classList.add("hidden");
+    params.textContent = "";
+    return;
+  }
+  params.innerHTML = `
+    <span>参数</span>
+    <code>${escapeHtml(command.params)}</code>
+    ${command.example ? `<small>例：${escapeHtml(command.example)}</small>` : ""}
+  `;
+  params.classList.remove("hidden");
+}
+
+function applyCommand(commandName) {
+  const input = $("#chatForm").message;
+  const command = state.commands.find((item) => item.name === commandName);
+  input.value = `${command?.name || commandName} `;
+  input.focus();
+  updateCommandParams(input.value);
+  hideCommandMenu();
 }
 
 function appendMessage(role, text) {
@@ -522,7 +811,37 @@ function bindEvents() {
   $("#templateForm").addEventListener("submit", generateTemplate);
   $("#searchForm").addEventListener("submit", runSearch);
   $("#configForm").addEventListener("submit", saveConfig);
+  $("#refreshModelsBtn").addEventListener("click", async () => {
+    const form = $("#configForm");
+    const config = {
+      ...(state.config || {}),
+      model_provider: form.model_provider.value,
+      ollama_base_url: form.ollama_base_url.value,
+      ollama_model: form.ollama_model.value,
+      ollama_embedding_model: form.ollama_embedding_model.value,
+      openai_model: form.openai_model.value,
+      openai_embedding_model: form.openai_embedding_model.value,
+    };
+    await renderModelOptions(config);
+    showNotice("模型选项已刷新");
+  });
+  $("#configForm").model_provider.addEventListener("change", async () => {
+    const form = $("#configForm");
+    await renderModelOptions({ ...(state.config || {}), model_provider: form.model_provider.value, ollama_base_url: form.ollama_base_url.value });
+  });
+  $("#configForm").ollama_base_url.addEventListener("change", async () => {
+    const form = $("#configForm");
+    await renderModelOptions({ ...(state.config || {}), model_provider: form.model_provider.value, ollama_base_url: form.ollama_base_url.value });
+  });
   $("#chatForm").addEventListener("submit", sendChat);
+  $("#chatForm").message.addEventListener("input", updateCommandMenu);
+  $("#chatForm").message.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") hideCommandMenu();
+  });
+  $("#commandMenu").addEventListener("click", (event) => {
+    const option = event.target.closest("[data-command]");
+    if (option) applyCommand(option.dataset.command);
+  });
   $("#reloadJobsBtn").addEventListener("click", loadJobs);
   $("#reloadVersionsBtn").addEventListener("click", loadVersions);
 
@@ -545,16 +864,16 @@ function bindEvents() {
     const card = event.target.closest("[data-version-id]");
     if (card) selectVersion(card.dataset.versionId);
   });
-  $$(".prompt-chip").forEach((button) => {
-    button.addEventListener("click", () => {
-      $("#chatForm").message.value = button.textContent;
-      $("#chatForm").requestSubmit();
-    });
+  $("#commandHints").addEventListener("click", (event) => {
+    const button = event.target.closest(".prompt-chip");
+    if (!button) return;
+    applyCommand(button.dataset.command || button.textContent.trim().split(/\s+/, 1)[0]);
   });
 }
 
 async function refreshAll() {
   showNotice("");
+  await loadCommands();
   await checkHealth();
   await loadDashboard();
   if ($("#matches").classList.contains("active")) await loadJobs();

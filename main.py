@@ -5,13 +5,16 @@ import argparse
 import json
 import sys
 from config.settings import settings
+from agent.nodes.plan_node import parse_job_query
 
 
 def _run(args: argparse.Namespace) -> int:
-    keywords = [k.strip() for k in args.keywords.split(",")]
+    user_query = getattr(args, "query", None) or args.keywords
+    city = getattr(args, "city", "全国")
+    keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
     threshold = getattr(args, "threshold", settings.match_threshold)
 
-    print(f"[JOBMATCH] Pipeline: keywords={keywords}, threshold={threshold}")
+    print(f"[JOBMATCH] Pipeline: keywords={keywords}, city={city}, threshold={threshold}")
     print(f"[JOBMATCH] DB: {settings.db_path}")
     print(f"[JOBMATCH] Boss state: {settings.boss_state_path}")
 
@@ -24,8 +27,9 @@ def _run(args: argparse.Namespace) -> int:
 
         graph = build_graph()
         state: AgentState = {
-            "user_query": args.keywords,
+            "user_query": user_query,
             "keywords": keywords,
+            "city": city,
             "threshold": threshold,
             "jobs": [], "retrieved_context": [],
             "match_results": [], "optimized_resumes": [],
@@ -74,7 +78,7 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _chat(_: argparse.Namespace) -> int:
-    print("[chat] JobMatch interactive mode. Type: run <kw1,kw2>, explain <job_id>, help, quit")
+    print("[chat] JobMatch interactive mode. Try: /search <城市> <关键词...> [80分以上]")
     while True:
         try:
             line = input("jobmatch> ").strip()
@@ -88,25 +92,94 @@ def _chat(_: argparse.Namespace) -> int:
             return 0
         if line == "help":
             print("Commands:")
-            print("  run Linux驱动,BSP [--threshold 75]")
+            print("  /search <城市> <关键词...> [80分以上]")
+            print("  /status")
+            print("  /help")
+            print("  帮我找上海的 Linux驱动,BSP 岗位")
+            print("  run Linux驱动,BSP [--city 上海] [--threshold 75]")
             print("  explain <job_id>")
             print("  quit")
+            continue
+        if line.startswith("/"):
+            if line in {"/help", "/"}:
+                print("Slash commands:")
+                print("  /search <城市> <关键词...> [80分以上]  运行岗位搜索")
+                print("  /status                         查看本地记录数量")
+                print("  /help                           查看帮助")
+                continue
+            if line.startswith("/search"):
+                query = line.removeprefix("/search").strip()
+                keywords, city, parsed_threshold = parse_job_query(query)
+                threshold = parsed_threshold or settings.match_threshold
+                if not keywords:
+                    print("[chat] 用法: /search <城市> <关键词...> [80分以上]")
+                    print("[chat] 示例: /search 上海 Linux驱动 BSP 80分以上")
+                    continue
+                _run(argparse.Namespace(
+                    keywords=",".join(keywords),
+                    city=city,
+                    threshold=threshold,
+                    query=query,
+                ))
+                continue
+            if line == "/status":
+                _print_status()
+                continue
+            print("[chat] Unknown slash command. Type /help.")
             continue
         if line.startswith("run "):
             parts = line[4:].split()
             keywords = parts[0]
+            city = "全国"
             threshold = settings.match_threshold
+            if "--city" in parts:
+                idx = parts.index("--city")
+                if idx + 1 < len(parts):
+                    city = parts[idx + 1]
             if "--threshold" in parts:
                 idx = parts.index("--threshold")
                 if idx + 1 < len(parts):
                     threshold = int(parts[idx + 1])
-            return _run(argparse.Namespace(keywords=keywords, threshold=threshold))
+            _run(argparse.Namespace(keywords=keywords, city=city, threshold=threshold, query=line[4:]))
+            continue
         if line.startswith("explain "):
             _explain(argparse.Namespace(job_id=line.split(maxsplit=1)[1]))
             continue
 
-        print("[chat] Unknown command. Type help for examples.")
+        keywords, city, parsed_threshold = parse_job_query(line)
+        if keywords:
+            threshold = parsed_threshold or settings.match_threshold
+            _run(argparse.Namespace(
+                keywords=",".join(keywords),
+                city=city,
+                threshold=threshold,
+                query=line,
+            ))
+            continue
+
+        print("[chat] I did not catch the target role. Type help for examples.")
     return 0
+
+
+def _print_status() -> None:
+    from storage.db import (
+        JobRecord,
+        LearningPlanRecord,
+        MatchRecord,
+        ResumeVersionRecord,
+        get_engine,
+        get_session,
+    )
+
+    get_engine(settings.db_path)
+    with get_session() as sess:
+        print(
+            "[status] "
+            f"jobs={sess.query(JobRecord).count()}, "
+            f"matches={sess.query(MatchRecord).count()}, "
+            f"resumes={sess.query(ResumeVersionRecord).count()}, "
+            f"plans={sess.query(LearningPlanRecord).count()}"
+        )
 
 
 def _explain(args: argparse.Namespace) -> int:
@@ -187,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_parser = subparsers.add_parser("run", help="Run full pipeline")
     run_parser.add_argument("--keywords", type=str, required=True, help="Comma-separated search keywords")
+    run_parser.add_argument("--city", type=str, default="全国", help="Boss city name (default: 全国)")
     run_parser.add_argument("--threshold", type=int, default=settings.match_threshold, help=f"Match threshold (default: {settings.match_threshold})")
     run_parser.set_defaults(func=_run)
 

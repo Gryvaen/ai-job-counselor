@@ -13,6 +13,10 @@ from scraper.session import BossSession
 from scraper.parser import parse_job_list
 
 
+class LoginRequiredError(RuntimeError):
+    """Raised when Boss redirects to a login wall during scraping."""
+
+
 class BossScraper:
     """Scrapes job listings from Boss Zhipin using an existing BossSession."""
 
@@ -40,6 +44,9 @@ class BossScraper:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=20000)
 
+                if await self._is_login_required(page):
+                    raise LoginRequiredError("Boss login is required before searching jobs.")
+
                 if await self._is_blocked(page):
                     print(f"[scraper] Blocked by anti-scraping at {url}")
                     break
@@ -56,6 +63,8 @@ class BossScraper:
                 if len(page_jobs) == 0:
                     break
 
+            except LoginRequiredError:
+                raise
             except Exception as e:
                 print(f"[scraper] Search failed for page {pg}: {e}")
                 break
@@ -64,6 +73,29 @@ class BossScraper:
 
         print(f"[scraper] Scraped {len(all_jobs)} jobs for keyword '{keyword}'")
         return all_jobs
+
+    async def _is_login_required(self, page: Page) -> bool:
+        """Check if Boss shows login page or login modal."""
+        try:
+            url = str(page.url)
+            title = await page.title()
+            if "/web/user/safe/login" in url or "login" in url.lower():
+                return True
+            if "登录" in title and "BOSS" in title.upper():
+                return True
+            login_selectors = [
+                ".login-dialog",
+                ".login-box",
+                ".scan-login",
+                "text=扫码登录",
+                "text=登录后继续",
+            ]
+            for selector in login_selectors:
+                if await page.query_selector(selector):
+                    return True
+        except Exception:
+            pass
+        return False
 
     async def _is_blocked(self, page: Page) -> bool:
         """Check if Boss shows anti-scraping page or login wall."""

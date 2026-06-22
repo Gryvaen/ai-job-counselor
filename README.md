@@ -57,13 +57,15 @@ FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 
 ### 4. Boss 直聘登录
 
-首次使用前需要手动登录 Boss 直聘保存 cookie：
+首次使用不再需要单独手动登录。运行流水线或进入 chat 后，如果本地没有可用登录态，Agent 会自动打开 Chromium 到 Boss 登录页，你只需要扫码登录一次，cookie 会保存到 `data/boss_state.json`，后续自动复用。
+
+也可以提前运行登录辅助脚本：
 
 ```bash
 .venv/bin/python scripts/login_boss.py
 ```
 
-这会打开一个 Chromium 浏览器窗口，请在窗口中手动完成 Boss 直聘的扫码/短信登录。登录成功后 cookie 会自动保存到 `data/boss_state.json`，后续无需重复登录。
+这会打开一个 Chromium 浏览器窗口，请在窗口中完成 Boss 直聘扫码/短信登录。
 
 ### 5. 准备简历主档案
 
@@ -90,14 +92,14 @@ cp data/resume.json.template data/resume.json
 ### 6. 运行流水线
 
 ```bash
-.venv/bin/python main.py run --keywords "Linux驱动,BSP"
+.venv/bin/python main.py run --keywords "Linux驱动,BSP" --city 上海
 ```
 
 可选参数：
 
 ```bash
 # 自定义匹配阈值
-.venv/bin/python main.py run --keywords "Linux驱动,BSP" --threshold 80
+.venv/bin/python main.py run --keywords "Linux驱动,BSP" --city 上海 --threshold 80
 ```
 
 **输出示例：**
@@ -131,6 +133,14 @@ Jobs notified: 3
 ```bash
 # 交互命令模式
 .venv/bin/python main.py chat
+
+# chat 中可以直接说
+帮我找上海的 Linux驱动,BSP 岗位 80分以上
+
+# 或使用 Claude 风格 slash 指令
+/search <城市> <关键词...> [80分以上]
+/status
+/help
 
 # 查看某个岗位的匹配、RAG 证据、简历草稿和学习计划
 .venv/bin/python main.py explain abc123
@@ -242,10 +252,10 @@ plan → scrape → retrieve → match → (condition: score >= threshold?)
 
 ## Docker + Ollama 本地模型
 
-项目提供 `docker-compose.yml`，会启动两个服务：
+项目提供 `docker-compose.yml`，默认只启动 JobMatch WebUI，并复用你已有的 Ollama 容器。
 
 - `webui`: JobMatch WebUI，默认暴露到 `http://127.0.0.1:8000`
-- `ollama`: 本地模型服务，WebUI 通过 `http://ollama:11434/v1` 调用
+- `ollama`: 复用外部容器，要求 WebUI 加入 Ollama 所在 Docker 网络
 
 首次启动：
 
@@ -254,11 +264,18 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-拉取推荐模型：
+如果你的 Ollama 来自 Open WebUI 的 compose，通常网络名是 `open-webui_default`，`.env` 保持：
+
+```env
+OLLAMA_DOCKER_NETWORK=open-webui_default
+OLLAMA_BASE_URL=http://ollama:11434/v1
+```
+
+在已有 Ollama 容器中拉取推荐模型：
 
 ```bash
-docker compose exec ollama ollama pull qwen2.5:7b
-docker compose exec ollama ollama pull nomic-embed-text
+docker exec ollama ollama pull qwen2.5:7b
+docker exec ollama ollama pull nomic-embed-text
 ```
 
 在 WebUI 的「设置」页选择：

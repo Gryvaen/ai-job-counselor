@@ -496,19 +496,121 @@ h2 {
   margin-top: 14px;
 }
 
+.command-input-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.command-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 10;
+  display: grid;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px;
+  background: #ffffff;
+  box-shadow: var(--shadow);
+}
+
+.command-params {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 30px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.command-params span {
+  font-weight: 800;
+}
+
+.command-params code {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 6px;
+  color: #254055;
+  background: var(--surface-muted);
+  font-family: inherit;
+}
+
+.command-params small {
+  color: var(--muted);
+}
+
+.command-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  border-radius: 6px;
+  padding: 10px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.command-option:hover {
+  color: var(--text);
+  background: var(--surface-muted);
+}
+
+.command-option strong,
+.command-option small {
+  display: block;
+}
+
+.command-option small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.command-option kbd {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
 .hint-list {
   display: grid;
   gap: 10px;
 }
 
 .prompt-chip {
+  display: grid;
+  gap: 3px;
   color: var(--text);
   background: var(--surface-muted);
   text-align: left;
 }
 
+.prompt-chip span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .prompt-chip:hover {
   color: #ffffff;
+}
+
+.prompt-chip:hover span {
+  color: #d7fff8;
 }
 
 .result-box {
@@ -519,6 +621,146 @@ h2 {
   color: var(--muted);
   background: var(--surface-muted);
   line-height: 1.6;
+}
+
+.task-panel {
+  margin-top: 12px;
+}
+
+.task-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(20, 124, 114, 0.24);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--text);
+  background: #f7fcfb;
+}
+
+.task-card[data-status="failed"] {
+  border-color: rgba(186, 47, 47, 0.3);
+  background: #fff7f7;
+}
+
+.task-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-head strong,
+.task-head span {
+  display: block;
+}
+
+.task-head strong {
+  margin-bottom: 4px;
+}
+
+.task-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-percent {
+  min-width: 54px;
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #ffffff !important;
+  background: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe8ef;
+}
+
+.progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+.login-qr {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(20, 124, 114, 0.18);
+  border-radius: 8px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.login-qr img {
+  width: 180px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.login-qr strong,
+.login-qr p {
+  display: block;
+  margin: 0;
+}
+
+.login-qr p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.task-events {
+  display: grid;
+  gap: 8px;
+}
+
+.task-event {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.task-event span {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.task-event p {
+  margin: 0;
+}
+
+.task-event.active p {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.task-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.task-summary span {
+  border-radius: 999px;
+  padding: 5px 8px;
+  color: #254055;
+  background: #ffffff;
+  font-size: 12px;
 }
 
 .settings-grid {
@@ -601,6 +843,10 @@ h2 {
   }
 
   .chat-form {
+    grid-template-columns: 1fr;
+  }
+
+  .login-qr {
     grid-template-columns: 1fr;
   }
 }

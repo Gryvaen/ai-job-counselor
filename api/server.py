@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import base64
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import settings
 from config.settings import PROJECT_ROOT
+from agent.nodes.plan_node import parse_job_query
 from models.agent_state import AgentState
 from models.job import Job
 from storage.db import (
@@ -63,6 +68,7 @@ class ResumeGenerateResponse(BaseModel):
 
 class JobSearchRequest(BaseModel):
     keywords: str = Field(min_length=1)
+    city: str = "全国"
     threshold: int = Field(default=settings.match_threshold, ge=0, le=100)
 
 
@@ -72,6 +78,12 @@ class JobSearchResponse(BaseModel):
     resumes_generated: int
     notified: int
     jobs: list[dict]
+    message: str
+
+
+class SearchTaskCreateResponse(BaseModel):
+    task_id: str
+    status: str
     message: str
 
 
@@ -118,6 +130,79 @@ class AppConfig(BaseModel):
 app = FastAPI(title="JobMatch Agent Web Console")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+TASK_LOCK = threading.Lock()
+TASK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jobmatch-search")
+SEARCH_TASKS: dict[str, dict] = {}
+TASK_TTL_SECONDS = 60 * 60 * 6
+
+
+SLASH_COMMANDS = [
+    {
+        "name": "/search",
+        "label": "搜索岗位",
+        "usage": "/search <city> <job> [score]",
+        "params": "<city> <job> [score]",
+        "example": "/search 上海 Linux驱动 BSP 80分以上",
+        "description": "打开 Boss 并按城市、关键词、匹配分运行完整岗位搜索。",
+    },
+    {
+        "name": "/status",
+        "label": "查看状态",
+        "usage": "/status",
+        "params": "",
+        "example": "/status",
+        "description": "查看岗位、匹配、简历版本和学习计划数量。",
+    },
+    {
+        "name": "/matches",
+        "label": "匹配结果",
+        "usage": "/matches",
+        "params": "",
+        "example": "/matches",
+        "description": "跳转到匹配结果页面。",
+    },
+    {
+        "name": "/versions",
+        "label": "简历版本",
+        "usage": "/versions",
+        "params": "",
+        "example": "/versions",
+        "description": "跳转到定制简历版本页面。",
+    },
+    {
+        "name": "/resume",
+        "label": "简历建议",
+        "usage": "/resume <target_role>",
+        "params": "<target_role>",
+        "example": "/resume 嵌入式 Linux 驱动",
+        "description": "基于简历事实档案给出定制简历建议。",
+    },
+    {
+        "name": "/profile",
+        "label": "简历档案",
+        "usage": "/profile",
+        "params": "",
+        "example": "/profile",
+        "description": "跳转到简历事实档案。",
+    },
+    {
+        "name": "/settings",
+        "label": "设置",
+        "usage": "/settings",
+        "params": "",
+        "example": "/settings",
+        "description": "跳转到模型、Boss 登录态和数据路径设置。",
+    },
+    {
+        "name": "/help",
+        "label": "帮助",
+        "usage": "/help",
+        "params": "",
+        "example": "/help",
+        "description": "列出可用 slash 指令。",
+    },
+]
+
 
 @app.on_event("startup")
 def startup() -> None:
@@ -145,9 +230,57 @@ def health() -> dict:
     }
 
 
+@app.get("/api/commands")
+def list_commands() -> dict:
+    return {"commands": SLASH_COMMANDS}
+
+
 @app.get("/api/config", response_model=AppConfig)
 def get_config() -> AppConfig:
     return _settings_to_config()
+
+
+@app.get("/api/models")
+async def list_models(provider: str = "ollama", base_url: str = "") -> dict:
+    provider = provider.lower().strip()
+    if provider == "ollama":
+        url = (base_url or settings.ollama_base_url).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{url}/models")
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            return {
+                "provider": provider,
+                "chat_models": [],
+                "embedding_models": [],
+                "warning": f"无法读取 Ollama 模型列表: {exc}",
+            }
+        models = [item.get("id", "") for item in data.get("data", []) if item.get("id")]
+        return {
+            "provider": provider,
+            "chat_models": models,
+            "embedding_models": models,
+            "warning": "" if models else "Ollama 当前没有返回模型，请先 pull 模型。",
+        }
+
+    return {
+        "provider": "openai",
+        "chat_models": [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "qwen-plus",
+            "qwen-turbo",
+        ],
+        "embedding_models": [
+            "text-embedding-3-small",
+            "text-embedding-3-large",
+        ],
+        "warning": "",
+    }
 
 
 @app.put("/api/config")
@@ -238,14 +371,77 @@ def search_jobs(payload: JobSearchRequest) -> JobSearchResponse:
     if not keywords:
         raise HTTPException(status_code=400, detail="请输入至少一个岗位关键词")
 
+    return _run_job_search(
+        keywords=keywords,
+        city=payload.city or "全国",
+        threshold=payload.threshold,
+        user_query=payload.keywords,
+    )
+
+
+@app.post("/api/jobs/search/tasks", response_model=SearchTaskCreateResponse)
+def create_search_task(payload: JobSearchRequest) -> SearchTaskCreateResponse:
+    keywords = _parse_keywords(payload.keywords)
+    if not keywords:
+        raise HTTPException(status_code=400, detail="请输入至少一个岗位关键词")
+
+    task_id = uuid.uuid4().hex
+    task = {
+        "id": task_id,
+        "type": "job_search",
+        "status": "queued",
+        "stage": "queued",
+        "progress": 0,
+        "message": "任务已排队，等待 Agent 开始搜索。",
+        "request": {
+            "keywords": keywords,
+            "city": payload.city or "全国",
+            "threshold": payload.threshold,
+            "user_query": payload.keywords,
+        },
+        "events": [],
+        "login_screenshot": "",
+        "result": None,
+        "error": "",
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    with TASK_LOCK:
+        _prune_tasks_locked()
+        SEARCH_TASKS[task_id] = task
+    _append_task_event(task_id, "queued", 0, "任务已排队，等待 Agent 开始搜索。")
+    TASK_EXECUTOR.submit(_run_search_task, task_id)
+    return SearchTaskCreateResponse(
+        task_id=task_id,
+        status="queued",
+        message="搜索任务已创建。",
+    )
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str) -> dict:
+    with TASK_LOCK:
+        task = SEARCH_TASKS.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在或已过期")
+        return json.loads(json.dumps(task, ensure_ascii=False, default=str))
+
+
+def _run_job_search(
+    keywords: list[str],
+    city: str,
+    threshold: int,
+    user_query: str,
+) -> JobSearchResponse:
     try:
         from agent.graph import build_graph
 
         graph = build_graph()
         state: AgentState = {
-            "user_query": payload.keywords,
+            "user_query": user_query,
             "keywords": keywords,
-            "threshold": payload.threshold,
+            "city": city,
+            "threshold": threshold,
             "jobs": [],
             "retrieved_context": [],
             "match_results": [],
@@ -267,7 +463,124 @@ def search_jobs(payload: JobSearchRequest) -> JobSearchResponse:
         resumes_generated=len(result.get("optimized_resumes", [])),
         notified=len(result.get("notified", [])),
         jobs=jobs,
-        message=f"已完成 {', '.join(keywords)} 搜索和匹配。",
+        message=f"已完成 {city} · {', '.join(keywords)} 搜索和匹配。",
+    )
+
+
+def _run_search_task(task_id: str) -> None:
+    with TASK_LOCK:
+        task = SEARCH_TASKS.get(task_id)
+        if not task:
+            return
+        request = dict(task["request"])
+
+    try:
+        result = _run_job_search_with_progress(
+            keywords=request["keywords"],
+            city=request["city"],
+            threshold=request["threshold"],
+            user_query=request["user_query"],
+            progress=lambda stage, pct, msg: _append_task_event(task_id, stage, pct, msg),
+            login_screenshot_callback=lambda image: _update_task_login_screenshot(task_id, image),
+        )
+        with TASK_LOCK:
+            task = SEARCH_TASKS.get(task_id)
+            if not task:
+                return
+            task["status"] = "completed"
+            task["stage"] = "completed"
+            task["progress"] = 100
+            task["message"] = result.message
+            task["result"] = result.model_dump()
+            task["updated_at"] = _now_iso()
+        _append_task_event(task_id, "completed", 100, result.message)
+    except Exception as exc:
+        message = str(exc)
+        with TASK_LOCK:
+            task = SEARCH_TASKS.get(task_id)
+            if not task:
+                return
+            task["status"] = "failed"
+            task["stage"] = "failed"
+            task["progress"] = max(int(task.get("progress", 0)), 1)
+            task["message"] = f"搜索失败: {message}"
+            task["error"] = message
+            task["updated_at"] = _now_iso()
+        _append_task_event(task_id, "failed", 100, f"搜索失败: {message}")
+
+
+def _run_job_search_with_progress(
+    keywords: list[str],
+    city: str,
+    threshold: int,
+    user_query: str,
+    progress,
+    login_screenshot_callback=None,
+) -> JobSearchResponse:
+    from agent.nodes.match_node import match_node
+    from agent.nodes.notify_node import notify_node
+    from agent.nodes.optimize_node import optimize_node
+    from agent.nodes.plan_node import plan_node
+    from agent.nodes.record_node import record_node
+    from agent.nodes.retrieve_node import retrieve_node
+    from agent.nodes.review_node import review_node
+    from agent.nodes.scrape_node import scrape_node
+
+    state: AgentState = {
+        "user_query": user_query,
+        "keywords": keywords,
+        "city": city,
+        "threshold": threshold,
+        "jobs": [],
+        "retrieved_context": [],
+        "match_results": [],
+        "optimized_resumes": [],
+        "learning_plans": [],
+        "notified": [],
+        "messages": [],
+        "login_screenshot_callback": login_screenshot_callback,
+    }
+
+    def apply_update(update: dict | None) -> None:
+        if update:
+            state.update(update)
+
+    progress("planning", 8, f"解析搜索意图: {city} · {', '.join(keywords)}")
+    apply_update(plan_node(state))
+
+    progress("scraping", 18, "打开 Boss 并检索岗位。若登录态失效，请在弹出的浏览器中扫码。")
+    apply_update(scrape_node(state))
+
+    progress("retrieving", 45, f"抓取到 {len(state.get('jobs', []))} 个新岗位，正在检索个人知识库证据。")
+    apply_update(retrieve_node(state))
+
+    progress("matching", 62, "正在计算岗位与简历事实档案的匹配分。")
+    apply_update(match_node(state))
+
+    high = [r for r in state.get("match_results", []) if r.score >= threshold]
+    if high:
+        progress("optimizing", 76, f"发现 {len(high)} 个高匹配岗位，正在生成定制简历和学习计划。")
+        apply_update(optimize_node(state))
+        progress("reviewing", 86, "正在复核简历草稿、ATS 覆盖和待核实内容。")
+        apply_update(review_node(state))
+        progress("notifying", 93, "正在发送通知并准备写入记录。")
+        apply_update(notify_node(state))
+    else:
+        progress("reviewing", 82, "暂无达到阈值的岗位，跳过简历生成并准备写入记录。")
+
+    progress("recording", 96, "正在保存岗位、匹配结果、简历版本和学习计划。")
+    apply_update(record_node(state))
+
+    with get_session() as sess:
+        jobs = _jobs_with_matches(sess, limit=30)
+
+    return JobSearchResponse(
+        jobs_scraped=len(state.get("jobs", [])),
+        matches_scored=len(state.get("match_results", [])),
+        resumes_generated=len(state.get("optimized_resumes", [])),
+        notified=len(state.get("notified", [])),
+        jobs=jobs,
+        message=f"已完成 {city} · {', '.join(keywords)} 搜索和匹配。",
     )
 
 
@@ -382,12 +695,15 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     text = payload.message.strip()
     lower = text.lower()
 
+    if text.startswith("/"):
+        return _handle_slash_command(text)
+
     if any(word in text for word in ["找工作", "搜岗位", "搜索岗位", "找岗位"]):
-        keywords = _extract_keywords_from_chat(text)
+        keywords, city, threshold = _parse_search_intent(text)
         return ChatResponse(
             action="suggest_search",
-            reply=f"我建议先搜索这些关键词: {', '.join(keywords)}。你可以到「岗位搜索」里直接运行，也可以把城市和阈值再补充一下。",
-            data={"keywords": ",".join(keywords)},
+            reply=f"我建议搜索 {city} 的这些关键词: {', '.join(keywords)}。输入 /search 后按参数提示填写城市、岗位和分数即可运行。",
+            data={"keywords": ",".join(keywords), "city": city, "threshold": threshold},
         )
 
     if any(word in text for word in ["改简历", "优化简历", "修改简历", "简历模板"]):
@@ -411,9 +727,143 @@ async def chat(payload: ChatRequest) -> ChatResponse:
 
     return ChatResponse(
         action="general",
-        reply="我现在可以帮你搜岗位、解释匹配、生成定制简历、整理简历事实档案。你可以试试说: 帮我找上海嵌入式 Linux 岗位。",
+        reply="我现在可以帮你搜岗位、解释匹配、生成定制简历、整理简历事实档案。输入 / 可以选择模式；选中 /search 后会显示参数提示。",
         data={},
     )
+
+
+def _handle_slash_command(text: str) -> ChatResponse:
+    command, _, raw_args = text.partition(" ")
+    command = command.lower().strip()
+    args = raw_args.strip()
+    command = _resolve_slash_command(command)
+
+    if command in {"/help", "/"}:
+        lines = ["可用指令:"]
+        lines.extend(f"{item['usage']} - {item['description']}" for item in SLASH_COMMANDS)
+        return ChatResponse(action="help", reply="\n".join(lines), data={"commands": SLASH_COMMANDS})
+
+    if command == "/search":
+        keywords, city, threshold = _parse_search_intent(args)
+        if not keywords:
+            raise HTTPException(status_code=400, detail="请在 /search 后输入岗位关键词，例如 /search 上海 Linux驱动 BSP")
+        task = create_search_task(JobSearchRequest(
+            keywords=",".join(keywords),
+            city=city,
+            threshold=threshold,
+        ))
+        return ChatResponse(
+            action="search_started",
+            reply=(
+                f"已启动搜索任务: {city} · {', '.join(keywords)}。\n"
+                "我会在下方显示进度，完成后自动切到匹配结果。"
+            ),
+            data={
+                "task_id": task.task_id,
+                "keywords": ",".join(keywords),
+                "city": city,
+                "threshold": threshold,
+            },
+        )
+
+    if command == "/status":
+        data = dashboard()
+        metrics = data["metrics"]
+        return ChatResponse(
+            action="dashboard",
+            reply=f"当前已记录 {metrics['jobs']} 个岗位、{metrics['matches']} 条匹配、{metrics['resumes']} 版简历、{metrics['plans']} 个学习计划。",
+            data=data,
+        )
+
+    if command == "/matches":
+        return ChatResponse(action="navigate", reply="已切到匹配结果。", data={"view": "matches"})
+
+    if command == "/versions":
+        return ChatResponse(action="navigate", reply="已切到简历版本。", data={"view": "versions"})
+
+    if command == "/profile":
+        return ChatResponse(action="navigate", reply="已切到简历事实档案。", data={"view": "profile"})
+
+    if command == "/settings":
+        return ChatResponse(action="navigate", reply="已切到设置。", data={"view": "settings"})
+
+    if command == "/resume":
+        profile = get_resume_profile()
+        target = args or "目标岗位"
+        return ChatResponse(
+            action="resume_advice",
+            reply=f"进入简历模式。针对 {target}，我会只使用简历事实档案里的经历，优先强化项目证据、关键词覆盖和可量化结果。",
+            data={"profile": profile, "target_role": target},
+        )
+
+    return ChatResponse(
+        action="unknown_command",
+        reply=f"不认识 {command}。输入 /help 查看可用指令。",
+        data={"commands": SLASH_COMMANDS},
+    )
+
+
+def _resolve_slash_command(command: str) -> str:
+    if command in {"/", ""}:
+        return command
+    names = [item["name"] for item in SLASH_COMMANDS]
+    if command in names:
+        return command
+    matches = [name for name in names if name.startswith(command)]
+    return matches[0] if len(matches) == 1 else command
+
+
+def _append_task_event(task_id: str, stage: str, progress: int, message: str) -> None:
+    event = {
+        "stage": stage,
+        "progress": max(0, min(100, int(progress))),
+        "message": message,
+        "time": _now_iso(),
+    }
+    with TASK_LOCK:
+        task = SEARCH_TASKS.get(task_id)
+        if not task:
+            return
+        if task.get("status") not in {"failed", "completed"}:
+            task["status"] = "running" if stage != "queued" else "queued"
+        task["stage"] = stage
+        task["progress"] = event["progress"]
+        task["message"] = message
+        task["updated_at"] = event["time"]
+        task.setdefault("events", []).append(event)
+        task["events"] = task["events"][-30:]
+
+
+def _update_task_login_screenshot(task_id: str, image: bytes) -> None:
+    encoded = base64.b64encode(image).decode("ascii")
+    with TASK_LOCK:
+        task = SEARCH_TASKS.get(task_id)
+        if not task:
+            return
+        task["login_screenshot"] = encoded
+        task["status"] = "running"
+        task["stage"] = "login"
+        task["progress"] = max(int(task.get("progress", 0)), 20)
+        task["message"] = "等待 Boss 扫码登录。请扫描下方二维码，登录成功后任务会继续。"
+        task["updated_at"] = _now_iso()
+
+
+def _prune_tasks_locked() -> None:
+    now = datetime.now().timestamp()
+    expired = []
+    for task_id, task in SEARCH_TASKS.items():
+        try:
+            updated = datetime.fromisoformat(task.get("updated_at", task.get("created_at"))).timestamp()
+        except Exception:
+            updated = now
+        if now - updated > TASK_TTL_SECONDS:
+            expired.append(task_id)
+    for task_id in expired:
+        SEARCH_TASKS.pop(task_id, None)
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 def _jobs_with_matches(sess, limit: int = 50) -> list[dict]:
@@ -668,13 +1118,12 @@ def _json_list(raw: str | None) -> list:
 
 
 def _parse_keywords(raw: str) -> list[str]:
-    return list(dict.fromkeys(p.strip() for p in re.split(r"[,，、\n]+", raw) if p.strip()))
+    return list(dict.fromkeys(p.strip() for p in re.split(r"[,，、\s\n]+", raw) if p.strip()))
 
 
-def _extract_keywords_from_chat(text: str) -> list[str]:
-    cleaned = re.sub(r"(帮我|请|想|找工作|搜岗位|搜索岗位|找岗位|岗位|工作)", " ", text)
-    parts = [p for p in re.split(r"[\s,，、]+", cleaned) if p]
-    return parts[:4] or ["Python", "后端"]
+def _parse_search_intent(text: str) -> tuple[list[str], str, int]:
+    keywords, city, parsed_threshold = parse_job_query(text)
+    return keywords, city, parsed_threshold or settings.match_threshold
 
 
 def _empty_resume_profile() -> dict:

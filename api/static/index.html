@@ -81,20 +81,25 @@
           <div class="chat-layout">
             <section class="panel chat-panel">
               <div id="chatLog" class="chat-log">
-                <div class="message agent">我可以帮你搜岗位、解释匹配、生成定制简历。试试说：帮我找上海嵌入式 Linux 岗位。</div>
+                <div class="message agent">我可以帮你搜岗位、解释匹配、生成定制简历。输入 / 选择模式，选中命令后会显示参数提示。</div>
               </div>
+              <div id="activeTaskPanel" class="task-panel hidden"></div>
               <form id="chatForm" class="chat-form">
-                <input name="message" placeholder="输入你的求职指令" autocomplete="off" />
+                <div class="command-input-wrap">
+                  <input name="message" placeholder="输入 / 选择模式，或直接描述你的求职指令" autocomplete="off" />
+                  <div id="commandMenu" class="command-menu hidden" role="listbox"></div>
+                  <div id="commandParams" class="command-params hidden"></div>
+                </div>
                 <button type="submit">发送</button>
               </form>
             </section>
 
             <aside class="panel">
-              <h2>可用指令</h2>
-              <div class="hint-list">
-                <button class="prompt-chip" type="button">帮我找上海嵌入式 Linux 岗位</button>
-                <button class="prompt-chip" type="button">帮我优化简历到后端方向</button>
-                <button class="prompt-chip" type="button">查看当前状态</button>
+              <h2>Slash 指令</h2>
+              <div id="commandHints" class="hint-list">
+                <button class="prompt-chip" type="button">/search &lt;city&gt; &lt;job&gt; [score]</button>
+                <button class="prompt-chip" type="button">/resume &lt;target_role&gt;</button>
+                <button class="prompt-chip" type="button">/status</button>
               </div>
             </aside>
           </div>
@@ -137,6 +142,7 @@
             <form id="searchForm" class="panel form-panel">
               <h2>岗位搜索</h2>
               <label><span>关键词</span><input name="keywords" required placeholder="Linux驱动,BSP,嵌入式" /></label>
+              <label><span>城市</span><input name="city" placeholder="上海" value="全国" /></label>
               <label><span>最低匹配分</span><input name="threshold" type="number" min="0" max="100" value="75" /></label>
               <button id="searchBtn" type="submit">开始搜索并匹配</button>
             </form>
@@ -197,17 +203,20 @@
               <label><span>OpenAI API Key</span><input name="openai_api_key" type="password" autocomplete="off" /></label>
               <div class="field-grid">
                 <label><span>OpenAI Base URL</span><input name="openai_base_url" placeholder="https://api.openai.com/v1" /></label>
-                <label><span>Chat Model</span><input name="openai_model" placeholder="gpt-4o-mini" /></label>
+                <label><span>Chat Model</span><select name="openai_model"></select></label>
               </div>
               <div class="field-grid">
-                <label><span>Embedding Model</span><input name="openai_embedding_model" placeholder="text-embedding-3-small" /></label>
+                <label><span>Embedding Model</span><select name="openai_embedding_model"></select></label>
                 <label><span>飞书 Webhook</span><input name="feishu_webhook" type="password" autocomplete="off" /></label>
               </div>
               <div class="field-grid">
                 <label><span>Ollama Base URL</span><input name="ollama_base_url" placeholder="http://127.0.0.1:11434/v1" /></label>
-                <label><span>Ollama Chat Model</span><input name="ollama_model" placeholder="qwen2.5:7b" /></label>
+                <label><span>Ollama Chat Model</span><select name="ollama_model"></select></label>
               </div>
-              <label><span>Ollama Embedding Model</span><input name="ollama_embedding_model" placeholder="nomic-embed-text" /></label>
+              <div class="field-grid">
+                <label><span>Ollama Embedding Model</span><select name="ollama_embedding_model"></select></label>
+                <label class="button-field"><span>模型列表</span><button id="refreshModelsBtn" type="button">刷新模型选项</button></label>
+              </div>
             </section>
 
             <section class="panel form-panel">

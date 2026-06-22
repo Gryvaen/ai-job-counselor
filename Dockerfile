@@ -10,6 +10,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+COPY requirements.txt ./
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt
+
+RUN python -m playwright install --with-deps chromium
+
 COPY pyproject.toml README.md ./
 COPY agent ./agent
 COPY api ./api
@@ -23,10 +29,7 @@ COPY scraper ./scraper
 COPY scripts ./scripts
 COPY storage ./storage
 
-RUN pip install --upgrade pip \
-    && pip install .
-
-RUN python -m playwright install --with-deps chromium
+RUN pip install --no-deps .
 
 EXPOSE 8000
 

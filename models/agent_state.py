@@ -19,6 +19,7 @@ class AgentState(dict):
 
     user_query: str  # 用户输入的查询/问题
     keywords: list[str]  # 关键词列表，由查询抽取或用户指定
+    city: str  # Boss 搜索城市，默认全国
     threshold: int  # 匹配分数阈值，用于筛选合格岗位
 
     # Data accumulated through the pipeline

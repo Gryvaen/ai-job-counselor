@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 from fastmcp import FastMCP
 from config.settings import settings
-from scraper import BossSession, BossScraper, deduplicate_jobs
+from scraper import BossSession, BossScraper, LoginRequiredError, deduplicate_jobs
 from storage.db import get_engine, get_session, get_cached_job_ids
 
 mcp = FastMCP("jobmatch-boss", port=8001)
@@ -31,25 +31,33 @@ async def search_jobs(keywords: list[str], city: str = "全国", max_pages: int 
     Returns:
         List of job dictionaries
     """
-    session = BossSession(settings.boss_state_path)
-    await session.start()
-    try:
-        scraper = BossScraper(session, fetch_detail=True)
-        all_jobs = []
-        for kw in keywords:
-            jobs = await scraper.search_jobs(kw, city=city, max_pages=max_pages, delay=3.0)
-            all_jobs.extend(jobs)
-        deduped = deduplicate_jobs(all_jobs)
-        # Dedup against DB
+    async def _search(headless: bool, login_first: bool = False) -> list[dict]:
+        session = BossSession(settings.boss_state_path)
+        await session.start(headless=headless)
         try:
-            get_engine(settings.db_path)
-            with get_session() as sess:
-                cached = get_cached_job_ids(sess)
-            return [j.model_dump() for j in deduped if j.id not in cached]
-        except Exception:
-            return [j.model_dump() for j in deduped]
-    finally:
-        await session.close()
+            if login_first:
+                await session.wait_for_login()
+            scraper = BossScraper(session, fetch_detail=True)
+            all_jobs = []
+            for kw in keywords:
+                jobs = await scraper.search_jobs(kw, city=city, max_pages=max_pages, delay=3.0)
+                all_jobs.extend(jobs)
+            deduped = deduplicate_jobs(all_jobs)
+            try:
+                get_engine(settings.db_path)
+                with get_session() as sess:
+                    cached = get_cached_job_ids(sess)
+                return [j.model_dump() for j in deduped if j.id not in cached]
+            except Exception:
+                return [j.model_dump() for j in deduped]
+        finally:
+            await session.close()
+
+    saved_login = BossSession(settings.boss_state_path).has_saved_login()
+    try:
+        return await _search(headless=saved_login, login_first=not saved_login)
+    except LoginRequiredError:
+        return await _search(headless=False, login_first=True)
 
 
 @mcp.tool()
