@@ -164,8 +164,34 @@ Web 端支持：
 
 - 输入技能、目标岗位、联系方式，生成 Markdown 简历模板
 - 传入 GitHub 个人主页，自动读取公开仓库并转成项目经历证据
+- 粘贴过往简历、项目经历、Markdown 或 JSON，生成新的 `data/resume.json` 简历事实档案
+- **设置页「重建知识库索引」**：将 `data/knowledge/` 入库到 Chroma
+- 在对话助手输入 `/search <城市> <岗位关键词> [分数]`，可视化查看解析、Boss 搜索、RAG 检索、匹配、简历生成、复核、保存全过程
+- 在匹配结果中按不同公司和岗位生成对应的定制简历版本
 - 自动提示岗位能力缺口
 - 一键复制/下载简历，生成版本保存到 `data/resume_versions/`
+
+### 9. 知识库入库（RAG 必做）
+
+将项目文档、笔记放入 `data/knowledge/` 子目录后执行：
+
+```bash
+.venv/bin/python scripts/ingest_knowledge.py
+```
+
+或在 WebUI **设置 → 重建知识库索引**。
+
+### 10. 定时自动搜索（cron）
+
+```bash
+# 每天早上 8 点（需配置 WEBUI_API_TOKEN 时加 Authorization 头）
+0 8 * * * curl -fsS -X POST -H "Authorization: Bearer $WEBUI_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"keywords":"Linux驱动,BSP","city":"上海","threshold":80}' \
+  http://127.0.0.1:8000/api/run
+```
+
+也可使用 CLI：`python main.py run --keywords "Linux驱动,BSP" --city 上海`
 
 ## 项目结构
 
@@ -223,6 +249,33 @@ ai_agent/
 ├── .gitignore                   # Git 忽略规则
 └── docs/ARCHITECTURE.md         # 架构设计文档
 ```
+
+## WebUI 工作流
+
+1. 在「我的简历」粘贴用户过往项目、原始简历、Markdown 或 JSON，点击「生成事实档案」。系统会解析姓名、联系方式、技能、项目、经历和教育信息，并写入 `data/resume.json`。
+2. 在「对话助手」输入 `/search 上海 AI Agent Python 80分以上`，或在「岗位搜索」表单提交关键词。后台任务会展示每个阶段的实时进度。
+3. 搜索完成后进入「匹配结果」，查看每个岗位的分数、优势、缺口和 RAG 证据。
+4. 对不同公司和岗位点击「生成定制简历」，系统会使用同一份事实档案生成岗位专属 Markdown 版本，并保存到 `data/resume_versions/` 和 SQLite。
+
+## 模块职责
+
+| 路径 | 作用 |
+|------|------|
+| `api/server.py` | FastAPI 后端，负责 WebUI API、配置保存、简历导入、后台搜索任务、chat slash 指令和结果查询 |
+| `api/static/` | 原生 HTML/CSS/JS 前端，提供仪表盘、对话助手、简历档案、搜索进度、匹配详情和设置页 |
+| `agent/graph.py` | LangGraph 主编排，把 plan/scrape/retrieve/match/optimize/review/notify/record 串成完整流水线 |
+| `agent/nodes/` | 单个 Agent 节点实现，每个节点只处理一个阶段的状态更新 |
+| `scraper/` | Playwright Boss 直聘浏览器自动化、登录态复用、岗位列表和详情解析 |
+| `rag/` | 知识库切分、入库和 Chroma 检索，为匹配解释提供个人项目证据 |
+| `crews/` | 简历优化和学习计划生成逻辑，基于 `resume.json` 事实档案，不主动编造经历 |
+| `models/` | Pydantic/状态模型，定义 Job、MatchResult、OptimizedResume、LearningPlan 和 AgentState |
+| `storage/db.py` | SQLite 表结构和持久化 helper，保存岗位、匹配、简历版本、学习计划和通知记录 |
+| `mcp_servers/` | MCP Server 适配层，把 Boss/RAG/Resume/Optimizer/Feishu 能力暴露给兼容客户端 |
+| `notifier/` | 飞书 Webhook 通知封装 |
+| `config/` | `.env` 和路径配置读取，支持 OpenAI 兼容 API 与本地 Ollama |
+| `scripts/` | Boss 登录、知识库入库等辅助脚本 |
+| `data/` | 本地运行数据，包含简历事实档案模板、登录态、知识库源文档和生成的简历版本 |
+| `tests/` | Mock 流水线、完整 Graph 和通知分支的集成测试 |
 
 ## 流水线架构
 
@@ -307,6 +360,34 @@ docker compose down
 ## 安全注意
 
 - `.env`、`boss_state.json`、`jobmatch.db` **不得提交到 git**（已在 `.gitignore`）
-- Boss 直聘采集仅限个人求职用途，建议每日 1-2 次
-- 简历主档案 (`data/resume.json`) **永不由 Agent 自动覆盖**
+- Boss 直聘采集仅限个人求职用途，建议每日 1-2 次（`SCRAPE_COOLDOWN_HOURS` 默认 24h）
+- 简历主档案 (`data/resume.json`) 只会在用户明确保存表单或点击「生成事实档案」时覆盖
 - 所有密钥通过环境变量注入，不写死在代码中
+- 公网/VPS 暴露时设置 `WEBUI_API_TOKEN`；`GET /api/config` 已对密钥脱敏
+
+## 个人生产版部署检查清单
+
+- [ ] `.env` 已配置（模型、飞书、可选 `WEBUI_API_TOKEN`）
+- [ ] `data/resume.json` 已填写事实档案
+- [ ] `data/knowledge/` 有内容且已执行 ingest（脚本或 WebUI）
+- [ ] Boss 登录态有效（`/api/health` → `boss_login_exists: true`）
+- [ ] `/api/health` 子检查通过（database / chroma / ollama）
+- [ ] 手动跑通一次 `/search` 全链路
+- [ ] `scripts/backup_data.sh` 已加入 cron（建议每日）
+- [ ] Docker `healthcheck` 绿色（若使用 compose）
+- [ ] uvicorn 监听 `127.0.0.1` 或反代 + Bearer token
+
+## 数据备份
+
+```bash
+./scripts/backup_data.sh
+# 归档写入 backups/YYYYMMDD_HHMMSS.tar.gz，自动保留最近 14 份
+```
+
+cron 示例：`0 3 * * * /path/to/ai_agent/scripts/backup_data.sh`
+
+## 测试
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+```

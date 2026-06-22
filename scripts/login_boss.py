@@ -24,10 +24,12 @@ async def main():
     print(f"State file: {settings.boss_state_path}")
     print()
 
-    session = BossSession(settings.boss_state_path)
-    await session.start(headless=False)  # Show browser window
-    await session.wait_for_login()
-    await session.close()
+    session = BossSession(settings.boss_state_path, fresh_login=not BossSession(settings.boss_state_path).has_saved_login())
+    try:
+        await session.start(headless=False)  # Show browser window
+        await session.wait_for_login()
+    finally:
+        await session.close()
 
     print("Login cookies saved. You can now run the pipeline.")
 

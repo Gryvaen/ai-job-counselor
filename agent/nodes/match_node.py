@@ -1,12 +1,16 @@
 """match_node.py — explainable job matching with resume and RAG signals."""
 
 import json
+import logging
 import re
 from typing import Literal
 
+from config.llm import is_llm_available, llm_match_job
 from config.settings import settings
 from models.agent_state import AgentState
 from models.match import MatchResult
+
+logger = logging.getLogger(__name__)
 
 _POSITIVE_KEYWORDS = [
     "linux", "驱动", "bsp", "嵌入式", "c", "stm32", "arm", "rtos",
@@ -21,16 +25,30 @@ def match_node(state: AgentState) -> dict:
     resume = _load_resume()
     contexts_by_job = _contexts_by_job(state.get("retrieved_context", []))
     results = []
+    use_llm = is_llm_available()
+
     for job in jobs:
         evidence = contexts_by_job.get(job.id, [])
         score, advantages, missing, reasoning = _score_job(job, state, resume, evidence)
-        results.append(MatchResult(
+        match = MatchResult(
             job_id=job.id, score=score, advantages=advantages,
             missing=missing[:5], suggest=_suggest(score, threshold),
             rag_evidence=evidence[:3],
             reasoning=reasoning,
-        ))
-    print(f"[agent/match] Scored {len(results)} jobs, {sum(1 for r in results if r.score >= threshold)} >= {threshold}")
+        )
+        if use_llm:
+            llm_result = llm_match_job(job, resume, evidence, score, threshold)
+            if llm_result:
+                match = llm_result
+        results.append(match)
+
+    logger.info(
+        "[agent/match] Scored %d jobs, %d >= %d (llm=%s)",
+        len(results),
+        sum(1 for r in results if r.score >= threshold),
+        threshold,
+        use_llm,
+    )
     return {"match_results": results}
 
 
@@ -41,7 +59,7 @@ def _load_resume() -> dict:
         with open(settings.resume_path, encoding="utf-8") as f:
             return json.load(f)
     except Exception as exc:
-        print(f"[agent/match] Could not load resume profile: {exc}")
+        logger.warning("[agent/match] Could not load resume profile: %s", exc)
         return {"skills": [], "preferences": {}}
 
 
@@ -102,6 +120,8 @@ def _score_job(job, state: AgentState, resume: dict, evidence: list[str]) -> tup
 
 
 def _suggest(score: int, threshold: int) -> Literal["推荐投递", "观望", "不推荐"]:
-    if score >= threshold: return "推荐投递"
-    elif score >= threshold - 15: return "观望"
-    else: return "不推荐"
+    if score >= threshold:
+        return "推荐投递"
+    if score >= threshold - 15:
+        return "观望"
+    return "不推荐"

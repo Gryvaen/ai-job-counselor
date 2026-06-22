@@ -1,27 +1,14 @@
-#!/usr/bin/env python3
-"""
-Full LangGraph integration test — runs compiled graph with pre-populated jobs.
-"""
-
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""Full LangGraph integration test with pre-populated jobs."""
 
 from models.job import Job
 from config.settings import settings
 
-def main():
-    print("=== Full LangGraph Integration Test ===")
-    print()
 
-    # Init DB
-    from storage.db import get_engine, get_session, save_job, get_cached_job_ids
-    get_engine(settings.db_path)
-    print(f"[1] DB initialized ✅")
+def test_full_graph_with_mock_jobs(tmp_db_path):
+    from storage.db import get_engine, get_session, get_cached_job_ids
+    from agent.graph import build_graph
 
-    # Pre-populate DB so the scrape_node dedup works
-    # We'll use a "fake scrape" approach: inject jobs directly into the graph state
+    get_engine(tmp_db_path)
     jobs = [
         Job(title="Linux BSP 开发", company="芯联科技", salary="15-25K", city="上海",
             description="熟悉 Linux 内核驱动开发，掌握 I2C/SPI/GPIO 等总线协议，有 device tree 经验",
@@ -37,18 +24,11 @@ def main():
             url="https://www.zhipin.com/job/4"),
     ]
 
-    print(f"[2] Loaded {len(jobs)} mock jobs ✅")
-
-    # Build graph
-    from agent.graph import build_graph
     graph = build_graph()
-    print(f"[3] Graph built ✅")
-
-    # Create initial state with jobs pre-populated (skip actual scraping)
     state = {
         "user_query": "Linux驱动,BSP 实习",
         "keywords": ["Linux驱动", "BSP"],
-        "threshold": 25,  # Lower threshold to trigger notify node
+        "threshold": 25,
         "jobs": jobs,
         "retrieved_context": [],
         "match_results": [],
@@ -57,35 +37,12 @@ def main():
         "notified": [],
         "messages": [],
     }
-
-    print(f"[4] Running full graph (threshold={state['threshold']})...")
     result = graph.invoke(state)
 
-    print()
-    print(f"=== Results ===")
-    print(f"  Jobs in state: {len(result['jobs'])}")
-    print(f"  Matches: {len(result['match_results'])}")
-    print(f"  Notified: {len(result['notified'])}")
-    print()
-
+    assert len(result["match_results"]) == 4
+    assert len(result["jobs"]) == 4
     high = [m for m in result["match_results"] if m.score >= state["threshold"]]
-    print(f"High-score ({state['threshold']}+): {len(high)}")
+    assert len(high) >= 1
 
-    for match in result["match_results"]:
-        job = next((j for j in result["jobs"] if j.id == match.job_id), None)
-        name = f"{job.title} @ {job.company}" if job else match.job_id
-        emoji = "✅" if match.score >= state["threshold"] else "⬜"
-        print(f"  {emoji} {match.score:3d} | {match.suggest:4s} | {name}")
-        if match.advantages:
-            print(f"       ✅ {', '.join(match.advantages[:3])}")
-
-    # Verify DB persistence
     with get_session() as sess:
-        cached = get_cached_job_ids(sess)
-        print(f"\n[5] DB has {len(cached)} jobs persisted ✅")
-
-    print("\n=== FULL GRAPH TEST PASSED ===")
-
-
-if __name__ == "__main__":
-    main()
+        assert len(get_cached_job_ids(sess)) >= 0

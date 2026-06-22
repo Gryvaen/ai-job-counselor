@@ -1,11 +1,15 @@
 """Resume Optimizer Crew — generates honest tailored resumes for high-score jobs."""
 
 import json
+import logging
 import re
 from pathlib import Path
 
+from config.llm import is_llm_available, llm_optimize_resume
 from config.settings import settings
 from models.resume import ResumeBullet, OptimizedResume
+
+logger = logging.getLogger(__name__)
 
 CORE_JOB_KEYWORDS = [
     "Linux", "驱动", "BSP", "嵌入式", "C", "STM32", "ARM", "RTOS",
@@ -44,6 +48,12 @@ def optimize_for_job(job, match: "MatchResult", resume: dict | None = None) -> O
     """
     if resume is None:
         resume = load_resume()
+
+    if is_llm_available():
+        llm_resume = llm_optimize_resume(job, match, resume)
+        if llm_resume:
+            logger.info("[resume_optimizer] LLM resume generated for %s", job.id)
+            return llm_resume
 
     job_text = f"{job.title} {job.description}".lower()
     skills = resume.get("skills", [])

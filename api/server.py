@@ -3,36 +3,49 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-import base64
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from sqlalchemy import text
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from config.llm import llm_chat
+from config.logging import setup_logging
 from config.settings import settings
 from config.settings import PROJECT_ROOT
 from agent.nodes.plan_node import parse_job_query
 from models.agent_state import AgentState
 from models.job import Job
+from scraper import BossSession
 from storage.db import (
     JobRecord,
     LearningPlanRecord,
     MatchRecord,
     ResumeVersionRecord,
+    create_search_task as db_create_search_task,
     get_engine,
+    get_search_task,
     get_session,
+    latest_knowledge_ingest,
+    prune_search_tasks,
+    record_knowledge_ingest,
+    update_search_task,
 )
 
+logger = logging.getLogger(__name__)
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+TASK_SCREENSHOT_DIR = settings.task_screenshots_dir
 
 
 class ResumeGenerateRequest(BaseModel):
@@ -44,6 +57,20 @@ class ResumeGenerateRequest(BaseModel):
     target_role: str = Field(min_length=1)
     github_url: str = ""
     notes: str = ""
+
+
+class ResumeImportRequest(BaseModel):
+    content: str = Field(min_length=20, description="Raw pasted resume text, Markdown, or JSON")
+    target_roles: str = ""
+    cities: str = ""
+    source_label: str = "pasted_resume"
+
+
+class ResumeImportResponse(BaseModel):
+    profile: dict
+    saved_path: str
+    extracted: dict
+    message: str
 
 
 class GithubProject(BaseModel):
@@ -125,14 +152,44 @@ class AppConfig(BaseModel):
     rag_chunk_overlap: int = Field(default=64, ge=0, le=4096)
     rag_top_k: int = Field(default=5, ge=1, le=50)
     match_threshold: int = Field(default=75, ge=0, le=100)
+    boss_auto_open_browser: bool = True
+    webui_api_token: str = ""
+
+
+class KnowledgeIngestResponse(BaseModel):
+    chunks: int
+    source_dir: str
+    message: str
+
+
+class PipelineRunRequest(BaseModel):
+    keywords: str = Field(min_length=1)
+    city: str = "全国"
+    threshold: int = Field(default=settings.match_threshold, ge=0, le=100)
 
 
 app = FastAPI(title="JobMatch Agent Web Console")
+
+
+class ApiTokenMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        token = settings.webui_api_token.strip()
+        if not token:
+            return await call_next(request)
+        path = request.url.path
+        if path in {"/api/health", "/"} or path.startswith("/static"):
+            return await call_next(request)
+        auth = request.headers.get("Authorization", "")
+        if auth == f"Bearer {token}":
+            return await call_next(request)
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+
+app.add_middleware(ApiTokenMiddleware)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 TASK_LOCK = threading.Lock()
-TASK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jobmatch-search")
-SEARCH_TASKS: dict[str, dict] = {}
+SEARCH_RUN_LOCK = threading.Lock()
 TASK_TTL_SECONDS = 60 * 60 * 6
 
 
@@ -206,8 +263,17 @@ SLASH_COMMANDS = [
 
 @app.on_event("startup")
 def startup() -> None:
+    setup_logging()
     get_engine(settings.db_path)
     settings.resume_versions_dir.mkdir(parents=True, exist_ok=True)
+    settings.task_screenshots_dir.mkdir(parents=True, exist_ok=True)
+    prune_search_tasks(TASK_TTL_SECONDS)
+    if settings.sentry_dsn:
+        try:
+            import sentry_sdk
+            sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=0.1)
+        except Exception as exc:
+            logger.warning("Sentry init failed: %s", exc)
 
 
 @app.get("/")
@@ -215,18 +281,66 @@ def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+def _check_db() -> tuple[bool, str]:
+    try:
+        with get_session() as sess:
+            sess.execute(text("SELECT 1"))
+        return True, "ok"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _check_chroma() -> tuple[bool, str]:
+    try:
+        from rag.retriever import RAGRetriever
+        retriever = RAGRetriever()
+        retriever.list_sources()
+        return True, "ok"
+    except Exception as exc:
+        return False, str(exc)
+
+
+async def _check_ollama() -> tuple[bool, str]:
+    if settings.model_provider.lower().strip() != "ollama":
+        return True, "skipped"
+    url = settings.ollama_base_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{url}/models")
+            resp.raise_for_status()
+        return True, "ok"
+    except Exception as exc:
+        return False, str(exc)
+
+
 @app.get("/api/health")
-def health() -> dict:
+async def health() -> dict:
+    db_ok, db_msg = _check_db()
+    chroma_ok, chroma_msg = _check_chroma()
+    ollama_ok, ollama_msg = await _check_ollama()
+    checks = {
+        "database": {"ok": db_ok, "detail": db_msg},
+        "chroma": {"ok": chroma_ok, "detail": chroma_msg},
+        "ollama": {"ok": ollama_ok, "detail": ollama_msg},
+    }
+    all_ok = all(item["ok"] for item in checks.values())
+    any_fail = any(not item["ok"] for item in checks.values() if item["detail"] != "skipped")
+    status = "ok" if all_ok else ("degraded" if any_fail else "ok")
+    ingest = latest_knowledge_ingest()
     return {
-        "ok": True,
+        "ok": status == "ok",
+        "status": status,
         "time": datetime.now().isoformat(timespec="seconds"),
         "db_path": str(settings.db_path),
         "resume_exists": settings.resume_path.exists(),
-        "boss_login_exists": settings.boss_state_path.exists(),
+        "boss_login_exists": BossSession(settings.boss_state_path).has_saved_login(),
         "openai_configured": bool(settings.openai_api_key),
         "model_provider": settings.model_provider,
         "ollama_configured": bool(settings.ollama_base_url and settings.ollama_model),
         "feishu_configured": bool(settings.feishu_webhook),
+        "auth_required": bool(settings.webui_api_token.strip()),
+        "checks": checks,
+        "knowledge_ingest": ingest,
     }
 
 
@@ -283,6 +397,49 @@ async def list_models(provider: str = "ollama", base_url: str = "") -> dict:
     }
 
 
+@app.post("/api/knowledge/ingest", response_model=KnowledgeIngestResponse)
+def ingest_knowledge() -> KnowledgeIngestResponse:
+    from rag.ingest import ingest_directory
+
+    try:
+        chunks = ingest_directory(settings.knowledge_dir)
+        record_knowledge_ingest(chunks, str(settings.knowledge_dir))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"知识库入库失败: {exc}") from exc
+    return KnowledgeIngestResponse(
+        chunks=chunks,
+        source_dir=str(settings.knowledge_dir),
+        message=f"已索引 {chunks} 个文本块。",
+    )
+
+
+@app.get("/api/knowledge/status")
+def knowledge_status() -> dict:
+    from rag.retriever import RAGRetriever
+
+    ingest = latest_knowledge_ingest()
+    sources = RAGRetriever().list_sources()
+    return {
+        "knowledge_dir": str(settings.knowledge_dir),
+        "latest_ingest": ingest,
+        "indexed_sources": len(sources),
+        "sources": sources[:20],
+    }
+
+
+@app.post("/api/run", response_model=JobSearchResponse)
+def run_pipeline(payload: PipelineRunRequest) -> JobSearchResponse:
+    keywords = _parse_keywords(payload.keywords)
+    if not keywords:
+        raise HTTPException(status_code=400, detail="请输入至少一个岗位关键词")
+    return _run_job_search(
+        keywords=keywords,
+        city=payload.city or "全国",
+        threshold=payload.threshold,
+        user_query=payload.keywords,
+    )
+
+
 @app.put("/api/config")
 def save_config(payload: AppConfig) -> dict:
     if payload.rag_chunk_overlap >= payload.rag_chunk_size:
@@ -298,7 +455,7 @@ def save_config(payload: AppConfig) -> dict:
     return {
         "ok": True,
         "message": "配置已保存到 .env，并已同步到当前 Web 进程。",
-        "config": _settings_to_config().model_dump(),
+        "config": _settings_to_config(mask_secrets=True).model_dump(),
     }
 
 
@@ -341,6 +498,29 @@ def save_resume_profile(payload: ResumeProfileSaveRequest) -> dict:
     return {"ok": True, "path": str(settings.resume_path)}
 
 
+@app.post("/api/import-resume", response_model=ResumeImportResponse)
+def import_resume(payload: ResumeImportRequest) -> ResumeImportResponse:
+    profile = _profile_from_resume_text(payload)
+    settings.resume_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.resume_path.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    extracted = {
+        "skills": len(profile.get("skills", [])),
+        "projects": len(profile.get("projects", [])),
+        "experience": len(profile.get("experience", [])),
+        "target_roles": profile.get("preferences", {}).get("target_roles", []),
+        "cities": profile.get("preferences", {}).get("cities", []),
+    }
+    return ResumeImportResponse(
+        profile=profile,
+        saved_path=str(settings.resume_path),
+        extracted=extracted,
+        message="已从传入简历生成新的简历事实档案，后续 /search 和定制简历都会使用这份档案。",
+    )
+
+
 @app.post("/api/generate-resume", response_model=ResumeGenerateResponse)
 async def generate_resume(payload: ResumeGenerateRequest) -> ResumeGenerateResponse:
     skills = _parse_skills(payload.skills)
@@ -380,7 +560,7 @@ def search_jobs(payload: JobSearchRequest) -> JobSearchResponse:
 
 
 @app.post("/api/jobs/search/tasks", response_model=SearchTaskCreateResponse)
-def create_search_task(payload: JobSearchRequest) -> SearchTaskCreateResponse:
+def create_search_task_endpoint(payload: JobSearchRequest) -> SearchTaskCreateResponse:
     keywords = _parse_keywords(payload.keywords)
     if not keywords:
         raise HTTPException(status_code=400, detail="请输入至少一个岗位关键词")
@@ -401,16 +581,20 @@ def create_search_task(payload: JobSearchRequest) -> SearchTaskCreateResponse:
         },
         "events": [],
         "login_screenshot": "",
+        "login_screenshot_url": "",
         "result": None,
         "error": "",
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
     }
     with TASK_LOCK:
-        _prune_tasks_locked()
-        SEARCH_TASKS[task_id] = task
+        prune_search_tasks(TASK_TTL_SECONDS)
+        db_create_search_task(task)
     _append_task_event(task_id, "queued", 0, "任务已排队，等待 Agent 开始搜索。")
-    TASK_EXECUTOR.submit(_run_search_task, task_id)
+    try:
+        _start_search_task(task_id)
+    except Exception as exc:
+        _fail_task(task_id, f"搜索任务启动失败: {exc}")
     return SearchTaskCreateResponse(
         task_id=task_id,
         status="queued",
@@ -420,11 +604,18 @@ def create_search_task(payload: JobSearchRequest) -> SearchTaskCreateResponse:
 
 @app.get("/api/tasks/{task_id}")
 def get_task(task_id: str) -> dict:
-    with TASK_LOCK:
-        task = SEARCH_TASKS.get(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="任务不存在或已过期")
-        return json.loads(json.dumps(task, ensure_ascii=False, default=str))
+    task = get_search_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return task
+
+
+@app.get("/api/tasks/{task_id}/login-screenshot")
+def get_task_login_screenshot(task_id: str) -> FileResponse:
+    path = TASK_SCREENSHOT_DIR / f"{task_id}.png"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="登录截图不存在")
+    return FileResponse(path, media_type="image/png")
 
 
 def _run_job_search(
@@ -468,13 +659,19 @@ def _run_job_search(
 
 
 def _run_search_task(task_id: str) -> None:
-    with TASK_LOCK:
-        task = SEARCH_TASKS.get(task_id)
-        if not task:
-            return
-        request = dict(task["request"])
+    acquired = SEARCH_RUN_LOCK.acquire(blocking=False)
+    if not acquired:
+        _append_task_event(task_id, "waiting", 2, "已有搜索任务正在运行，本任务等待上一轮结束。")
+        SEARCH_RUN_LOCK.acquire()
+
+    task = get_search_task(task_id)
+    if not task:
+        SEARCH_RUN_LOCK.release()
+        return
+    request = dict(task["request"])
 
     try:
+        _append_task_event(task_id, "starting", 4, "Agent 线程已启动，正在准备搜索环境。")
         result = _run_job_search_with_progress(
             keywords=request["keywords"],
             city=request["city"],
@@ -482,31 +679,53 @@ def _run_search_task(task_id: str) -> None:
             user_query=request["user_query"],
             progress=lambda stage, pct, msg: _append_task_event(task_id, stage, pct, msg),
             login_screenshot_callback=lambda image: _update_task_login_screenshot(task_id, image),
+            login_started_callback=lambda: _append_task_event(
+                task_id,
+                "login",
+                20,
+                "正在打开 Boss 登录页。请在弹出的 Chrome 窗口或下方二维码处扫码登录。",
+            ),
         )
-        with TASK_LOCK:
-            task = SEARCH_TASKS.get(task_id)
-            if not task:
-                return
-            task["status"] = "completed"
-            task["stage"] = "completed"
-            task["progress"] = 100
-            task["message"] = result.message
-            task["result"] = result.model_dump()
-            task["updated_at"] = _now_iso()
+        update_search_task(
+            task_id,
+            status="completed",
+            stage="completed",
+            progress=100,
+            message=result.message,
+            result=result.model_dump(),
+        )
         _append_task_event(task_id, "completed", 100, result.message)
     except Exception as exc:
-        message = str(exc)
-        with TASK_LOCK:
-            task = SEARCH_TASKS.get(task_id)
-            if not task:
-                return
-            task["status"] = "failed"
-            task["stage"] = "failed"
-            task["progress"] = max(int(task.get("progress", 0)), 1)
-            task["message"] = f"搜索失败: {message}"
-            task["error"] = message
-            task["updated_at"] = _now_iso()
-        _append_task_event(task_id, "failed", 100, f"搜索失败: {message}")
+        logger.exception("Search task %s failed", task_id)
+        _fail_task(task_id, f"搜索失败: {exc}")
+    finally:
+        SEARCH_RUN_LOCK.release()
+
+
+def _start_search_task(task_id: str) -> None:
+    thread = threading.Thread(
+        target=_run_search_task,
+        args=(task_id,),
+        name=f"jobmatch-search-{task_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _fail_task(task_id: str, message: str) -> None:
+    task = get_search_task(task_id)
+    if not task:
+        return
+    progress = max(int(task.get("progress", 0)), 1)
+    update_search_task(
+        task_id,
+        status="failed",
+        stage="failed",
+        progress=progress,
+        message=message,
+        error=message,
+    )
+    _append_task_event(task_id, "failed", 100, message)
 
 
 def _run_job_search_with_progress(
@@ -516,6 +735,7 @@ def _run_job_search_with_progress(
     user_query: str,
     progress,
     login_screenshot_callback=None,
+    login_started_callback=None,
 ) -> JobSearchResponse:
     from agent.nodes.match_node import match_node
     from agent.nodes.notify_node import notify_node
@@ -539,6 +759,7 @@ def _run_job_search_with_progress(
         "notified": [],
         "messages": [],
         "login_screenshot_callback": login_screenshot_callback,
+        "login_started_callback": login_started_callback,
     }
 
     def apply_update(update: dict | None) -> None:
@@ -549,7 +770,13 @@ def _run_job_search_with_progress(
     apply_update(plan_node(state))
 
     progress("scraping", 18, "打开 Boss 并检索岗位。若登录态失效，请在弹出的浏览器中扫码。")
-    apply_update(scrape_node(state))
+    scrape_update = scrape_node(state)
+    apply_update(scrape_update)
+    scrape_error = scrape_update.get("scrape_error", "")
+    if scrape_error == "no_jobs_found":
+        progress("scraping", 22, "Boss 未返回岗位，可能登录失效或页面结构变化。请检查 data/debug/ 调试产物。")
+    elif scrape_error:
+        raise RuntimeError(f"Boss 采集失败: {scrape_error}")
 
     progress("retrieving", 45, f"抓取到 {len(state.get('jobs', []))} 个新岗位，正在检索个人知识库证据。")
     apply_update(retrieve_node(state))
@@ -698,36 +925,71 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     if text.startswith("/"):
         return _handle_slash_command(text)
 
+    action = "general"
+    data: dict = {}
+    context_parts: list[str] = []
+
     if any(word in text for word in ["找工作", "搜岗位", "搜索岗位", "找岗位"]):
         keywords, city, threshold = _parse_search_intent(text)
-        return ChatResponse(
-            action="suggest_search",
-            reply=f"我建议搜索 {city} 的这些关键词: {', '.join(keywords)}。输入 /search 后按参数提示填写城市、岗位和分数即可运行。",
-            data={"keywords": ",".join(keywords), "city": city, "threshold": threshold},
+        action = "suggest_search"
+        data = {"keywords": ",".join(keywords), "city": city, "threshold": threshold}
+        context_parts.append(
+            f"用户想找岗位。建议关键词: {', '.join(keywords)}，城市: {city}，匹配阈值: {threshold}。"
+            "可引导使用 /search 命令启动搜索。"
         )
 
-    if any(word in text for word in ["改简历", "优化简历", "修改简历", "简历模板"]):
+    elif any(word in text for word in ["改简历", "优化简历", "修改简历", "简历模板"]):
         profile = get_resume_profile()
         roles = profile.get("preferences", {}).get("target_roles", [])
-        role_text = "、".join(roles) if roles else "你的目标岗位"
-        return ChatResponse(
-            action="resume_advice",
-            reply=f"可以。我会基于 resume.json 的事实来改，不编造经历。当前建议先围绕 {role_text} 强化项目经历、量化结果和可验证链接。",
-            data={"profile": profile},
+        action = "resume_advice"
+        data = {"profile": profile}
+        context_parts.append(
+            f"用户想优化简历。目标岗位: {'、'.join(roles) if roles else '未设置'}。"
+            "只能基于 resume.json 事实改写，不得编造经历。"
         )
 
-    if "状态" in text or "概览" in text or "dashboard" in lower:
-        data = dashboard()
+    elif "状态" in text or "概览" in text or "dashboard" in lower:
+        dash = dashboard()
+        metrics = dash["metrics"]
+        action = "dashboard"
+        data = dash
+        context_parts.append(
+            f"系统概览: {metrics['jobs']} 个岗位、{metrics['matches']} 条匹配、"
+            f"{metrics['resumes']} 版简历、{metrics['plans']} 个学习计划。"
+        )
+
+    reply = llm_chat(text, context="\n".join(context_parts))
+    if reply:
+        return ChatResponse(action=action, reply=reply, data=data)
+
+    if action == "suggest_search":
+        keywords = data.get("keywords", "").split(",")
+        city = data.get("city", "全国")
+        return ChatResponse(
+            action=action,
+            reply=f"我建议搜索 {city} 的这些关键词: {', '.join(keywords)}。输入 /search 启动搜索。（LLM 未配置或不可用）",
+            data=data,
+        )
+    if action == "resume_advice":
+        return ChatResponse(
+            action=action,
+            reply="可以。我会基于 resume.json 的事实来改，不编造经历。（LLM 未配置或不可用）",
+            data=data,
+        )
+    if action == "dashboard":
         metrics = data["metrics"]
         return ChatResponse(
-            action="dashboard",
-            reply=f"当前已记录 {metrics['jobs']} 个岗位、{metrics['matches']} 条匹配、{metrics['resumes']} 版简历、{metrics['plans']} 个学习计划。",
+            action=action,
+            reply=(
+                f"当前已记录 {metrics['jobs']} 个岗位、{metrics['matches']} 条匹配、"
+                f"{metrics['resumes']} 版简历、{metrics['plans']} 个学习计划。（LLM 未配置或不可用）"
+            ),
             data=data,
         )
 
     return ChatResponse(
         action="general",
-        reply="我现在可以帮你搜岗位、解释匹配、生成定制简历、整理简历事实档案。输入 / 可以选择模式；选中 /search 后会显示参数提示。",
+        reply="LLM 未配置或暂时不可用。请检查设置页的 MODEL_PROVIDER 和 Ollama 连接，或使用 /help 查看指令。",
         data={},
     )
 
@@ -747,7 +1009,7 @@ def _handle_slash_command(text: str) -> ChatResponse:
         keywords, city, threshold = _parse_search_intent(args)
         if not keywords:
             raise HTTPException(status_code=400, detail="请在 /search 后输入岗位关键词，例如 /search 上海 Linux驱动 BSP")
-        task = create_search_task(JobSearchRequest(
+        task = create_search_task_endpoint(JobSearchRequest(
             keywords=",".join(keywords),
             city=city,
             threshold=threshold,
@@ -821,45 +1083,56 @@ def _append_task_event(task_id: str, stage: str, progress: int, message: str) ->
         "time": _now_iso(),
     }
     with TASK_LOCK:
-        task = SEARCH_TASKS.get(task_id)
+        task = get_search_task(task_id)
         if not task:
             return
-        if task.get("status") not in {"failed", "completed"}:
-            task["status"] = "running" if stage != "queued" else "queued"
-        task["stage"] = stage
-        task["progress"] = event["progress"]
-        task["message"] = message
-        task["updated_at"] = event["time"]
-        task.setdefault("events", []).append(event)
-        task["events"] = task["events"][-30:]
+        events = list(task.get("events", []))
+        events.append(event)
+        events = events[-30:]
+        status = task.get("status", "queued")
+        if status not in {"failed", "completed"}:
+            status = "running" if stage != "queued" else "queued"
+        update_search_task(
+            task_id,
+            status=status,
+            stage=stage,
+            progress=event["progress"],
+            message=message,
+            events=events,
+        )
 
 
 def _update_task_login_screenshot(task_id: str, image: bytes) -> None:
-    encoded = base64.b64encode(image).decode("ascii")
-    with TASK_LOCK:
-        task = SEARCH_TASKS.get(task_id)
-        if not task:
-            return
-        task["login_screenshot"] = encoded
-        task["status"] = "running"
-        task["stage"] = "login"
-        task["progress"] = max(int(task.get("progress", 0)), 20)
-        task["message"] = "等待 Boss 扫码登录。请扫描下方二维码，登录成功后任务会继续。"
-        task["updated_at"] = _now_iso()
+    TASK_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    path = TASK_SCREENSHOT_DIR / f"{task_id}.png"
+    path.write_bytes(image)
+    current = get_search_task(task_id) or {}
+    update_search_task(
+        task_id,
+        status="running",
+        stage="login",
+        progress=max(int(current.get("progress", 0)), 20),
+        message="等待 Boss 扫码登录。请扫描下方二维码，登录成功后任务会继续。",
+        screenshot_path=str(path),
+    )
 
 
-def _prune_tasks_locked() -> None:
-    now = datetime.now().timestamp()
-    expired = []
-    for task_id, task in SEARCH_TASKS.items():
-        try:
-            updated = datetime.fromisoformat(task.get("updated_at", task.get("created_at"))).timestamp()
-        except Exception:
-            updated = now
-        if now - updated > TASK_TTL_SECONDS:
-            expired.append(task_id)
-    for task_id in expired:
-        SEARCH_TASKS.pop(task_id, None)
+def _mask_secret(value: str, keep_end: int = 4) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if len(value) <= keep_end + 3:
+        return "***"
+    return f"{'*' * 8}{value[-keep_end:]}"
+
+
+def _mask_api_key(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if value.startswith("sk-"):
+        return f"sk-***{value[-4:]}" if len(value) > 7 else "sk-***"
+    return _mask_secret(value)
 
 
 def _now_iso() -> str:
@@ -891,20 +1164,29 @@ CONFIG_ENV_KEYS = {
     "rag_chunk_overlap": "RAG_CHUNK_OVERLAP",
     "rag_top_k": "RAG_TOP_K",
     "match_threshold": "MATCH_THRESHOLD",
+    "boss_auto_open_browser": "BOSS_AUTO_OPEN_BROWSER",
+    "webui_api_token": "WEBUI_API_TOKEN",
 }
 
 
-def _settings_to_config() -> AppConfig:
+def _settings_to_config(mask_secrets: bool = True) -> AppConfig:
+    api_key = settings.openai_api_key
+    webhook = settings.feishu_webhook
+    token = settings.webui_api_token
+    if mask_secrets:
+        api_key = _mask_api_key(api_key)
+        webhook = _mask_secret(webhook)
+        token = _mask_secret(token) if token else ""
     return AppConfig(
         model_provider=settings.model_provider,
-        openai_api_key=settings.openai_api_key,
+        openai_api_key=api_key,
         openai_base_url=_clean_config_value(settings.openai_base_url or ""),
         openai_model=settings.openai_model,
         openai_embedding_model=settings.openai_embedding_model,
         ollama_base_url=settings.ollama_base_url,
         ollama_model=settings.ollama_model,
         ollama_embedding_model=settings.ollama_embedding_model,
-        feishu_webhook=settings.feishu_webhook,
+        feishu_webhook=webhook,
         resume_path=_display_path(settings.resume_path),
         boss_state_path=_display_path(settings.boss_state_path),
         knowledge_dir=_display_path(settings.knowledge_dir),
@@ -915,11 +1197,14 @@ def _settings_to_config() -> AppConfig:
         rag_chunk_overlap=settings.rag_chunk_overlap,
         rag_top_k=settings.rag_top_k,
         match_threshold=settings.match_threshold,
+        boss_auto_open_browser=settings.boss_auto_open_browser,
+        webui_api_token=token,
     )
 
 
 def _apply_config(config: AppConfig) -> None:
-    settings.openai_api_key = config.openai_api_key.strip()
+    if config.openai_api_key.strip() and not config.openai_api_key.strip().startswith("*"):
+        settings.openai_api_key = config.openai_api_key.strip()
     settings.model_provider = config.model_provider.strip()
     settings.openai_base_url = config.openai_base_url.strip() or None
     settings.openai_model = config.openai_model.strip()
@@ -927,7 +1212,10 @@ def _apply_config(config: AppConfig) -> None:
     settings.ollama_base_url = config.ollama_base_url.strip()
     settings.ollama_model = config.ollama_model.strip()
     settings.ollama_embedding_model = config.ollama_embedding_model.strip()
-    settings.feishu_webhook = config.feishu_webhook.strip()
+    if config.feishu_webhook.strip() and not config.feishu_webhook.strip().startswith("*"):
+        settings.feishu_webhook = config.feishu_webhook.strip()
+    if config.webui_api_token.strip() and not config.webui_api_token.strip().startswith("*"):
+        settings.webui_api_token = config.webui_api_token.strip()
     settings.resume_path = _resolve_config_path(config.resume_path)
     settings.boss_state_path = _resolve_config_path(config.boss_state_path)
     settings.knowledge_dir = _resolve_config_path(config.knowledge_dir)
@@ -938,6 +1226,7 @@ def _apply_config(config: AppConfig) -> None:
     settings.rag_chunk_overlap = config.rag_chunk_overlap
     settings.rag_top_k = config.rag_top_k
     settings.match_threshold = config.match_threshold
+    settings.boss_auto_open_browser = config.boss_auto_open_browser
 
 
 def _write_env(config: AppConfig) -> None:
@@ -945,6 +1234,8 @@ def _write_env(config: AppConfig) -> None:
     current = _read_env_file(env_path)
     values = config.model_dump()
     for field, env_key in CONFIG_ENV_KEYS.items():
+        if field not in values:
+            continue
         current[env_key] = str(values[field]).strip()
     lines = ["# JobMatch Agent WebUI managed config"]
     for field, env_key in CONFIG_ENV_KEYS.items():
@@ -1136,6 +1427,230 @@ def _empty_resume_profile() -> dict:
         "preferences": {"cities": [], "target_roles": [], "keywords": [], "salary_range": ""},
         "constraints": {"do_not_invent": True, "must_mark_uncertain": True},
     }
+
+
+def _profile_from_resume_text(payload: ResumeImportRequest) -> dict:
+    content = payload.content.strip()
+    parsed_json = _try_parse_resume_json(content)
+    if parsed_json:
+        profile = _normalize_resume_profile(parsed_json)
+    else:
+        profile = _extract_resume_profile(content, payload.source_label)
+
+    target_roles = _parse_skills(payload.target_roles)
+    cities = _parse_skills(payload.cities)
+    preferences = profile.setdefault("preferences", {})
+    if target_roles:
+        preferences["target_roles"] = target_roles
+        preferences["keywords"] = target_roles
+    else:
+        preferences.setdefault("target_roles", [])
+        preferences.setdefault("keywords", preferences.get("target_roles", []))
+    if cities:
+        preferences["cities"] = cities
+        preferences["city"] = cities[0]
+    else:
+        preferences.setdefault("cities", [profile.get("profile", {}).get("location", "")] if profile.get("profile", {}).get("location") else [])
+        preferences.setdefault("city", preferences.get("cities", [""])[0] if preferences.get("cities") else "")
+
+    profile.setdefault("constraints", {})
+    profile["constraints"].update({"do_not_invent": True, "must_mark_uncertain": True})
+    return profile
+
+
+def _try_parse_resume_json(content: str) -> dict | None:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_resume_profile(raw: dict) -> dict:
+    if "profile" in raw:
+        profile = raw
+    else:
+        profile = {
+            "profile": {
+                "name": raw.get("name", ""),
+                "email": raw.get("email", ""),
+                "phone": raw.get("phone", ""),
+                "location": raw.get("location", raw.get("city", "")),
+            },
+            "skills": raw.get("skills", []),
+            "projects": raw.get("projects", []),
+            "experience": raw.get("experience", []),
+            "education": raw.get("education", []),
+            "preferences": raw.get("preferences", {}),
+            "constraints": raw.get("constraints", {}),
+        }
+    base = _empty_resume_profile()
+    base.update(profile)
+    base["profile"] = {**_empty_resume_profile()["profile"], **profile.get("profile", {})}
+    base["skills"] = _dedupe_strings(profile.get("skills", []))
+    base["projects"] = profile.get("projects", []) if isinstance(profile.get("projects", []), list) else []
+    base["experience"] = profile.get("experience", []) if isinstance(profile.get("experience", []), list) else []
+    base["education"] = profile.get("education", []) if isinstance(profile.get("education", []), list) else []
+    base["preferences"] = {**_empty_resume_profile()["preferences"], **profile.get("preferences", {})}
+    return base
+
+
+def _extract_resume_profile(content: str, source_label: str) -> dict:
+    lines = [line.strip(" \t-*#>") for line in content.splitlines()]
+    lines = [line for line in lines if line]
+    compact = "\n".join(lines)
+    sections = _split_resume_sections(lines)
+
+    base = _empty_resume_profile()
+    base["profile"] = {
+        "name": _extract_name(lines),
+        "email": _first_match(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", content),
+        "phone": _first_match(r"(?:\+?86[-\s]?)?1[3-9]\d{9}", content),
+        "location": _extract_location(compact),
+    }
+    base["skills"] = _dedupe_strings(_extract_skills(content, sections))
+    base["projects"] = _extract_projects(sections, source_label)
+    base["experience"] = _extract_experience(sections, source_label)
+    base["education"] = _extract_education(sections)
+    base["preferences"] = {
+        "cities": [base["profile"]["location"]] if base["profile"]["location"] else [],
+        "city": base["profile"]["location"],
+        "target_roles": [],
+        "keywords": [],
+        "salary_range": "",
+    }
+    base["source"] = {"type": "imported_text", "label": source_label, "imported_at": _now_iso()}
+    return base
+
+
+def _split_resume_sections(lines: list[str]) -> dict[str, list[str]]:
+    aliases = {
+        "skills": ("技能", "技能栈", "专业技能", "技术栈", "technical skills"),
+        "projects": ("项目", "项目经历", "项目经验", "project"),
+        "experience": ("工作经历", "实习经历", "工作经验", "experience"),
+        "education": ("教育", "教育经历", "education"),
+    }
+    sections: dict[str, list[str]] = {key: [] for key in aliases}
+    current = ""
+    for line in lines:
+        lowered = line.lower().rstrip(":：")
+        matched = next((key for key, names in aliases.items() if any(name in lowered for name in names)), "")
+        if matched and len(line) <= 28:
+            current = matched
+            continue
+        if current:
+            sections[current].append(line)
+    return sections
+
+
+def _extract_name(lines: list[str]) -> str:
+    for line in lines[:6]:
+        if _first_match(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", line) or _first_match(r"1[3-9]\d{9}", line):
+            continue
+        cleaned = re.sub(r"(个人简历|简历|resume|姓名[:：])", "", line, flags=re.I).strip()
+        if 1 < len(cleaned) <= 24:
+            return cleaned
+    return ""
+
+
+def _extract_location(text: str) -> str:
+    city_words = ["北京", "上海", "深圳", "广州", "杭州", "南京", "苏州", "成都", "武汉", "西安", "全国"]
+    for city in city_words:
+        if city in text:
+            return city
+    match = re.search(r"(?:城市|所在地|现居)[:：\s]*([\u4e00-\u9fff]{2,8})", text)
+    return match.group(1) if match else ""
+
+
+def _extract_skills(content: str, sections: dict[str, list[str]]) -> list[str]:
+    known = [
+        "Python", "Java", "Go", "C++", "C", "JavaScript", "TypeScript", "React", "Vue",
+        "Node.js", "FastAPI", "Django", "Flask", "SQL", "MySQL", "PostgreSQL", "Redis",
+        "Docker", "Kubernetes", "Linux", "Git", "LangGraph", "RAG", "OpenAI", "LLM",
+        "STM32", "ARM", "RTOS", "BSP", "I2C", "SPI", "GPIO", "Device Tree",
+    ]
+    found = [skill for skill in known if _contains_token(content, skill)]
+    section_text = "\n".join(sections.get("skills", []))
+    found.extend(_parse_skills(section_text))
+    return found
+
+
+def _extract_projects(sections: dict[str, list[str]], source_label: str) -> list[dict]:
+    return _lines_to_items(sections.get("projects", []), "项目", source_label)
+
+
+def _extract_experience(sections: dict[str, list[str]], source_label: str) -> list[dict]:
+    items = []
+    for item in _lines_to_items(sections.get("experience", []), "经历", source_label):
+        items.append({
+            "company": item["name"],
+            "role": "",
+            "start": "",
+            "end": "",
+            "bullets": [item["description"]] if item["description"] else [],
+            "evidence": item["evidence"],
+        })
+    return items
+
+
+def _extract_education(sections: dict[str, list[str]]) -> list[dict]:
+    education = []
+    for line in sections.get("education", [])[:4]:
+        education.append({"school": line, "degree": "", "major": "", "start": "", "end": ""})
+    return education
+
+
+def _lines_to_items(lines: list[str], fallback_name: str, source_label: str) -> list[dict]:
+    items = []
+    buffer: list[str] = []
+    for line in lines:
+        starts_item = bool(re.match(r"^([\u4e00-\u9fffA-Za-z0-9_. -]{2,40})[:：]", line))
+        if starts_item and buffer:
+            items.append(_buffer_to_item(buffer, fallback_name, source_label))
+            buffer = [line]
+        else:
+            buffer.append(line)
+    if buffer:
+        items.append(_buffer_to_item(buffer, fallback_name, source_label))
+    return items[:8]
+
+
+def _buffer_to_item(buffer: list[str], fallback_name: str, source_label: str) -> dict:
+    first = buffer[0]
+    if "：" in first or ":" in first:
+        name, desc = re.split(r"[:：]", first, 1)
+    else:
+        name, desc = first[:32], first
+    details = "；".join([desc.strip(), *buffer[1:]]).strip("； ")
+    return {
+        "name": name.strip() or fallback_name,
+        "description": details,
+        "skills": _dedupe_strings(_extract_skills(details, {"skills": []}))[:10],
+        "evidence": source_label or "imported_resume",
+    }
+
+
+def _first_match(pattern: str, text: str) -> str:
+    match = re.search(pattern, text)
+    return match.group(0) if match else ""
+
+
+def _contains_token(text: str, token: str) -> bool:
+    if re.fullmatch(r"[A-Za-z0-9+#. -]+", token):
+        return bool(re.search(rf"(?<![A-Za-z0-9+#.-]){re.escape(token)}(?![A-Za-z0-9+#.-])", text, re.I))
+    return token.lower() in text.lower()
+
+
+def _dedupe_strings(values: list | tuple) -> list[str]:
+    result = []
+    for value in values:
+        if isinstance(value, str):
+            item = value.strip()
+        else:
+            item = str(value).strip()
+        if item and item not in result:
+            result.append(item)
+    return result
 
 
 def _parse_skills(raw: str) -> list[str]:

@@ -696,6 +696,67 @@ $ python main.py explain --job-id abc123
 
 ---
 
+## 13.1 当前 Web Console 架构
+
+Web Console 是本项目面向个人使用的主入口，覆盖「导入简历 → `/search` 搜索 → 可视化过程 → 岗位匹配 → 公司/岗位定制简历」闭环。
+
+```mermaid
+flowchart LR
+    U[用户] --> UI[api/static WebUI]
+    UI --> API[FastAPI api/server.py]
+    API --> PROFILE[data/resume.json]
+    API --> TASK[后台搜索任务队列]
+    TASK --> LG[LangGraph Pipeline]
+    LG --> BOSS[Boss Playwright Scraper]
+    LG --> RAG[Chroma RAG]
+    LG --> MATCH[MatchResult]
+    LG --> RESUME[定制简历生成]
+    LG --> DB[(SQLite)]
+    UI <-->|轮询 /api/tasks/{id}| TASK
+    UI -->|按岗位生成| API
+    API --> VERSIONS[data/resume_versions/]
+```
+
+### Web Console 数据流
+
+1. 用户在「我的简历」粘贴过往简历、项目经历、Markdown 或 JSON。
+2. `POST /api/import-resume` 解析并生成 `data/resume.json`，这是后续匹配与简历生成的事实来源。
+3. 用户在对话框输入 `/search <城市> <岗位关键词> [分数]`，`/api/chat` 创建后台搜索任务。
+4. 前端轮询 `/api/tasks/{task_id}`，可视化展示 queued/planning/scraping/retrieving/matching/optimizing/reviewing/notifying/recording/completed 阶段。
+5. 搜索任务调用 LangGraph 节点，完成 Boss 采集、RAG 检索、匹配评分、定制简历、复核、通知和入库。
+6. 用户在「匹配结果」里选择不同公司和岗位，调用 `POST /api/jobs/{job_id}/generate-resume` 生成岗位专属简历版本。
+
+### 目录与模块职责
+
+| 路径 | 模块职责 |
+|------|----------|
+| `api/server.py` | FastAPI 应用；提供 WebUI API、配置管理、简历导入、后台任务、slash command、岗位/简历版本查询 |
+| `api/static/index.html` | Web Console 页面结构，包含概览、对话助手、简历档案、岗位搜索、匹配结果、简历版本和设置 |
+| `api/static/app.js` | 前端状态管理、API 调用、任务轮询、slash command 提示、搜索过程可视化和详情渲染 |
+| `api/static/styles.css` | Web Console 视觉样式、响应式布局、进度阶段轨道和表单/列表组件 |
+| `agent/graph.py` | LangGraph StateGraph 定义，串联完整求职流水线并根据匹配阈值分支 |
+| `agent/nodes/plan_node.py` | 从自然语言或 `/search` 参数中解析城市、关键词和最低匹配分 |
+| `agent/nodes/scrape_node.py` | 调用 Boss 采集器，处理登录态、扫码截图回调和岗位去重 |
+| `agent/nodes/retrieve_node.py` | 使用岗位 JD 检索个人知识库，提供 RAG 证据 |
+| `agent/nodes/match_node.py` | 根据 JD、简历事实档案、搜索词和 RAG 证据计算匹配分 |
+| `agent/nodes/optimize_node.py` | 为高分岗位生成定制简历草稿 |
+| `agent/nodes/review_node.py` | 标记待核实内容，复核 ATS 关键词覆盖和简历风险 |
+| `agent/nodes/notify_node.py` | 将高匹配岗位和摘要推送到飞书 |
+| `agent/nodes/record_node.py` | 将岗位、匹配、简历版本和学习计划写入 SQLite |
+| `models/` | 定义跨模块传递的数据结构，保证 Job、MatchResult、OptimizedResume、LearningPlan 和 AgentState 类型一致 |
+| `scraper/` | Boss 直聘 Playwright 自动化，包括浏览器 session、登录态保存、搜索和 DOM 解析 |
+| `rag/` | 知识库文档切分、向量入库和 Chroma 检索 |
+| `crews/` | 简历优化与学习计划生成逻辑，强调只使用可验证事实 |
+| `storage/db.py` | SQLAlchemy 表结构和 CRUD helper，负责 SQLite 持久化 |
+| `notifier/` | 飞书 Webhook 封装，未配置时自动跳过 |
+| `mcp_servers/` | Boss/RAG/Resume/Optimizer/Feishu MCP Server，供 IDE、桌面 AI 或自研客户端复用 |
+| `config/` | 统一读取 `.env`、模型提供商、数据路径、RAG 参数和匹配阈值 |
+| `scripts/` | 登录 Boss、导入知识库等开发/运维脚本 |
+| `data/` | 本地业务数据，包括 `resume.json`、`resume_versions/`、Boss 登录态、知识库源文件和 SQLite 数据库 |
+| `tests/` | Mock pipeline、完整 LangGraph 和通知分支的集成测试 |
+
+---
+
 ## 14. 实施路线
 
 | 阶段 | 周期 | 交付物 | 可演示 |
@@ -758,3 +819,19 @@ $ python main.py explain --job-id abc123
 - [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
 - [FastMCP](https://github.com/jlowin/fastmcp)
 - [飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)
+
+---
+
+## 18. 当前实现 vs 架构目标（2026-06）
+
+| 能力 | 架构目标 | 当前实现 |
+|------|----------|----------|
+| 匹配 | LLM Structured Output | 规则打分 + LLM 精排（`config/llm.py`，无 Key 时降级） |
+| 简历优化 | CrewAI 多 Agent | 单 LLM prompt + `review_node` 规则质检 |
+| 对话 | LLM 意图解析 | slash 指令 + 关键词路由 |
+| MCP | 5 独立 Server | 代码可用，Docker 流水线未默认集成 |
+| 任务状态 | 持久化 | SQLite `search_tasks` 表 |
+| 运维 | 健康检查/备份/CI | `/api/health` 深度检查、`backup_data.sh`、GitHub Actions |
+| 安全 | — | 可选 `WEBUI_API_TOKEN`、配置脱敏 |
+
+个人生产版以 **Web Console + LangGraph 流水线** 为主入口；MCP/CrewAI 为可选扩展，不影响日用闭环。

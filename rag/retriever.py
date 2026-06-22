@@ -3,6 +3,7 @@ RAG Retriever — queries Chroma vector store for job-related knowledge.
 """
 
 import hashlib
+import logging
 from pathlib import Path
 
 import chromadb
@@ -10,6 +11,8 @@ from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from openai import OpenAI
 
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIEmbeddingFunction(EmbeddingFunction[Documents]):
@@ -94,7 +97,7 @@ class RAGRetriever:
                     items.append((doc, meta))
             return items
         except Exception as e:
-            print(f"[rag] Retrieval failed: {e}")
+            logger.warning("[rag] Retrieval failed: %s", e)
             return []
 
     def ingest(self, texts: list[str], metadatas: list[dict], ids: list[str] | None = None):
@@ -105,7 +108,7 @@ class RAGRetriever:
         if ids is None:
             ids = [hashlib.md5(t.encode()).hexdigest() for t in texts]
         collection.add(documents=texts, metadatas=metadatas, ids=ids)
-        print(f"[rag] Ingested {len(texts)} chunks.")
+        logger.info("[rag] Ingested %d chunks.", len(texts))
 
     def list_sources(self) -> list[dict]:
         """List unique sources in Chroma."""
@@ -120,5 +123,5 @@ class RAGRetriever:
                     sources.append({"source": src, "type": meta.get("source_type", "unknown")})
             return sources
         except Exception as e:
-            print(f"[rag] Failed to list sources: {e}")
+            logger.warning("[rag] Failed to list sources: %s", e)
             return []

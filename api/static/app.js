@@ -9,6 +9,8 @@ const state = {
   commands: [],
   activeTaskId: null,
   taskPollTimer: null,
+  bossLoginPending: false,
+  apiToken: localStorage.getItem("jobmatch_api_token") || "",
 };
 
 const titles = {
@@ -20,6 +22,22 @@ const titles = {
   versions: "简历版本",
   settings: "设置",
 };
+
+const taskStages = [
+  ["queued", "排队"],
+  ["waiting", "等待"],
+  ["starting", "启动"],
+  ["planning", "解析"],
+  ["login", "登录"],
+  ["scraping", "Boss"],
+  ["retrieving", "证据"],
+  ["matching", "匹配"],
+  ["optimizing", "简历"],
+  ["reviewing", "复核"],
+  ["notifying", "通知"],
+  ["recording", "保存"],
+  ["completed", "完成"],
+];
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -38,12 +56,33 @@ function showNotice(message, type = "info") {
   notice.classList.remove("hidden");
 }
 
+function emptyState(title, detail = "") {
+  return `
+    <div>
+      <strong>${escapeHtml(title)}</strong>
+      ${detail ? `<p>${escapeHtml(detail)}</p>` : ""}
+    </div>
+  `;
+}
+
 async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (state.apiToken) {
+    headers.Authorization = `Bearer ${state.apiToken}`;
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers,
     ...options,
   });
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    const token = window.prompt("需要 API Token（WEBUI_API_TOKEN）:");
+    if (token) {
+      state.apiToken = token.trim();
+      localStorage.setItem("jobmatch_api_token", state.apiToken);
+      return api(path, options);
+    }
+  }
   if (!response.ok) {
     throw new Error(body.detail || "请求失败");
   }
@@ -71,22 +110,121 @@ function switchView(view) {
   if (view === "matches") loadJobs();
   if (view === "versions") loadVersions();
   if (view === "profile") loadProfile();
-  if (view === "settings") loadConfig();
+  if (view === "settings") {
+    loadConfig();
+    loadKnowledgeStatus();
+  }
+  if (view === "search") renderBossLoginStatus();
 }
 
 async function checkHealth() {
   try {
     const data = await api("/api/health");
     state.health = data;
-    $("#healthDot").className = "dot online";
-    $("#healthText").textContent = "online";
-    $("#healthMeta").textContent = data.boss_login_exists ? "Boss 登录态存在" : "Boss 未登录";
+    const online = data.status === "ok" || data.ok;
+    $("#healthDot").className = online ? "dot online" : "dot offline";
+    $("#healthText").textContent = data.status || (online ? "online" : "degraded");
+    $("#healthMeta").textContent = online ? "后端已连接" : "服务异常";
+    renderBossLoginStatus();
   } catch (error) {
     $("#healthDot").className = "dot offline";
     $("#healthText").textContent = "offline";
     $("#healthMeta").textContent = error.message;
+    renderBossLoginStatus({ offline: true });
   }
   renderSettings();
+}
+
+function isBossLoggedIn() {
+  return Boolean(state.health?.boss_login_exists);
+}
+
+function renderBossLoginStatus(options = {}) {
+  const dot = $("#bossLoginDot");
+  const text = $("#bossLoginText");
+  const meta = $("#bossLoginMeta");
+  const banner = $("#bossSearchBanner");
+  if (!dot || !text || !meta) return;
+
+  if (options.offline) {
+    dot.className = "dot offline";
+    text.textContent = "Boss 状态未知";
+    meta.textContent = "后端未连接";
+    if (banner) banner.classList.add("hidden");
+    return;
+  }
+
+  if (state.activeTaskId && state.bossLoginPending) {
+    dot.className = "dot pending";
+    text.textContent = "等待 Boss 登录";
+    meta.textContent = "请在 Chrome 或下方二维码扫码";
+    if (banner) {
+      banner.className = "boss-search-banner pending";
+      banner.textContent = "正在等待 Boss 扫码登录。请在弹出的 Chrome 窗口完成登录；若出现安全验证，手动点一下后任务会自动重试。";
+      banner.classList.remove("hidden");
+    }
+    return;
+  }
+
+  if (isBossLoggedIn()) {
+    dot.className = "dot online";
+    text.textContent = "Boss 已登录";
+    meta.textContent = "可直接发起搜索";
+    if (banner) {
+      banner.className = "boss-search-banner ok";
+      banner.textContent = "Boss 登录态有效。搜索会在 Chrome 中可视化打开岗位列表，不会自动投递或批量私信。";
+      banner.classList.remove("hidden");
+    }
+    return;
+  }
+
+  dot.className = "dot warn";
+  text.textContent = "Boss 未登录";
+  meta.textContent = "搜索时将打开 Chrome 扫码";
+  if (banner) {
+    banner.className = "boss-search-banner";
+    banner.textContent = "尚未检测到 Boss 登录。发起搜索后会弹出 Chrome 登录页，也可用终端运行 python scripts/login_boss.py 预先登录。";
+    banner.classList.remove("hidden");
+  }
+}
+
+function confirmBossSearch() {
+  if (isBossLoggedIn()) return true;
+  return window.confirm(
+    "尚未检测到 Boss 登录态。\n\n" +
+    "继续后将打开 Chrome 登录页，请用 Boss 直聘 App 扫码。\n" +
+    "若出现安全验证，在浏览器里手动完成即可，任务会自动重试。\n\n" +
+    "本工具只做搜索与匹配展示，不会自动投递或批量私信。是否继续？"
+  );
+}
+
+async function loadKnowledgeStatus() {
+  try {
+    const data = await api("/api/knowledge/status");
+    $("#settingKnowledgeSources").textContent = String(data.indexed_sources ?? "-");
+    const ingest = data.latest_ingest;
+    $("#settingKnowledgeIngest").textContent = ingest
+      ? `${ingest.chunks} chunks · ${ingest.ingested_at}`
+      : "尚未入库";
+  } catch (error) {
+    $("#settingKnowledgeSources").textContent = "-";
+    $("#settingKnowledgeIngest").textContent = error.message;
+  }
+}
+
+async function ingestKnowledge() {
+  const button = $("#ingestKnowledgeBtn");
+  setBusy(button, true, "入库中...");
+  try {
+    const result = await api("/api/knowledge/ingest", { method: "POST" });
+    showNotice(result.message || "知识库索引已重建");
+    await loadKnowledgeStatus();
+    await checkHealth();
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
 }
 
 async function loadCommands() {
@@ -114,11 +252,15 @@ function renderCommandHints() {
 }
 
 async function loadConfig() {
-  const config = await api("/api/config");
-  state.config = config;
-  await renderModelOptions(config);
-  renderConfigForm(config);
-  renderSettings();
+  try {
+    const config = await api("/api/config");
+    state.config = config;
+    await renderModelOptions(config);
+    renderConfigForm(config);
+    renderSettings();
+  } catch (error) {
+    showNotice(error.message, "error");
+  }
 }
 
 function renderConfigForm(config) {
@@ -217,13 +359,18 @@ async function saveConfig(event) {
 }
 
 async function loadDashboard() {
-  const data = await api("/api/dashboard");
-  state.dashboard = data;
-  $("#metricJobs").textContent = data.metrics.jobs;
-  $("#metricMatches").textContent = data.metrics.matches;
-  $("#metricResumes").textContent = data.metrics.resumes;
-  $("#metricPlans").textContent = data.metrics.plans;
-  renderJobList($("#latestJobs"), data.latest_jobs || [], { compact: true });
+  try {
+    const data = await api("/api/dashboard");
+    state.dashboard = data;
+    $("#metricJobs").textContent = data.metrics.jobs;
+    $("#metricMatches").textContent = data.metrics.matches;
+    $("#metricResumes").textContent = data.metrics.resumes;
+    $("#metricPlans").textContent = data.metrics.plans;
+    renderJobList($("#latestJobs"), data.latest_jobs || [], { compact: true });
+  } catch (error) {
+    renderJobList($("#latestJobs"), [], { compact: true });
+    showNotice(error.message, "error");
+  }
 }
 
 async function loadProfile() {
@@ -283,6 +430,33 @@ async function saveProfile(event) {
   }
 }
 
+async function importResume(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = $("#importResumeBtn");
+  setBusy(button, true, "生成中...");
+  try {
+    const result = await api("/api/import-resume", {
+      method: "POST",
+      body: JSON.stringify({
+        content: form.content.value,
+        target_roles: form.target_roles.value,
+        cities: form.cities.value,
+        source_label: "web_import",
+      }),
+    });
+    await loadProfile();
+    await checkHealth();
+    const extracted = result.extracted || {};
+    showNotice(`${result.message} 技能 ${extracted.skills || 0} 项，项目 ${extracted.projects || 0} 个，经历 ${extracted.experience || 0} 段。`);
+    form.content.value = "";
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function generateTemplate(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -317,6 +491,8 @@ async function generateTemplate(event) {
 
 async function runSearch(event) {
   event.preventDefault();
+  if (!confirmBossSearch()) return;
+
   const form = event.currentTarget;
   const button = $("#searchBtn");
   const output = $("#searchResult");
@@ -345,6 +521,8 @@ async function runSearch(event) {
 
 function startTaskPolling(taskId) {
   state.activeTaskId = taskId;
+  state.bossLoginPending = !isBossLoggedIn();
+  renderBossLoginStatus();
   if (state.taskPollTimer) clearTimeout(state.taskPollTimer);
   pollTask(taskId);
 }
@@ -352,6 +530,12 @@ function startTaskPolling(taskId) {
 async function pollTask(taskId) {
   try {
     const task = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
+    if (task.stage === "login") {
+      state.bossLoginPending = true;
+    } else if (task.status === "completed") {
+      state.bossLoginPending = false;
+    }
+    renderBossLoginStatus();
     renderTask(task);
     if (task.status === "completed") {
       await finishTask(task);
@@ -371,6 +555,7 @@ async function pollTask(taskId) {
 async function finishTask(task) {
   const result = task.result || {};
   state.activeTaskId = null;
+  state.bossLoginPending = false;
   if (state.taskPollTimer) clearTimeout(state.taskPollTimer);
   state.taskPollTimer = null;
   state.jobs = result.jobs || [];
@@ -378,6 +563,7 @@ async function finishTask(task) {
   renderJobList($("#jobList"), state.jobs);
   await loadDashboard();
   await loadJobs();
+  await checkHealth();
   setBusy($("#searchBtn"), false);
   appendMessage("agent", `${result.message || "搜索完成"} 抓取 ${result.jobs_scraped || 0} 个岗位，匹配 ${result.matches_scored || 0} 个。`);
   switchView("matches");
@@ -385,6 +571,8 @@ async function finishTask(task) {
 
 function failTask(task) {
   state.activeTaskId = null;
+  state.bossLoginPending = false;
+  renderBossLoginStatus();
   if (state.taskPollTimer) clearTimeout(state.taskPollTimer);
   state.taskPollTimer = null;
   renderTask(task);
@@ -416,6 +604,18 @@ function taskHtml(task) {
     completed: "已完成",
     failed: "失败",
   }[task.status] || task.status;
+  const seenStages = new Set(events.map((event) => event.stage));
+  if (task.stage) seenStages.add(task.stage);
+  const screenshotSrc = task.login_screenshot_url
+    ? `${task.login_screenshot_url}${task.login_screenshot_url.includes("?") ? "&" : "?"}t=${Date.now()}`
+    : task.login_screenshot
+      ? `data:image/png;base64,${task.login_screenshot}`
+      : "";
+  const securityHint = (task.message || "").includes("安全") || (task.message || "").includes("security")
+    ? `<div class="task-hint">出现 Boss 安全验证时，请在 Chrome 窗口手动完成，完成后任务会自动重试。</div>`
+    : task.stage === "login"
+      ? `<div class="task-hint">请在弹出的 Chrome 窗口或下方二维码扫码登录。登录成功后无需再次提交搜索。</div>`
+      : "";
   return `
     <div class="task-card" data-status="${escapeAttr(task.status)}">
       <div class="task-head">
@@ -426,15 +626,24 @@ function taskHtml(task) {
         <span class="task-percent">${Number(task.progress || 0)}%</span>
       </div>
       <div class="progress-track"><span style="width:${Number(task.progress || 0)}%"></span></div>
-      ${task.login_screenshot ? `
+      <div class="stage-rail">
+        ${taskStages.map(([stage, label]) => `
+          <span class="${stage === task.stage ? "active" : seenStages.has(stage) ? "done" : ""}">
+            ${escapeHtml(label)}
+          </span>
+        `).join("")}
+      </div>
+      ${screenshotSrc ? `
         <div class="login-qr">
-          <img src="data:image/png;base64,${escapeAttr(task.login_screenshot)}" alt="Boss 登录二维码" />
+          <img src="${escapeAttr(screenshotSrc)}" alt="Boss 登录二维码截图" />
           <div>
             <strong>扫码登录 Boss</strong>
             <p>请用 Boss 直聘 App 扫码。登录成功后，Agent 会自动继续搜索，不需要再次提交。</p>
+            <a class="plain-link" href="${escapeAttr(screenshotSrc)}" target="_blank" rel="noreferrer">打开登录截图</a>
           </div>
         </div>
       ` : ""}
+      ${securityHint}
       <div class="task-events">
         ${events.map((event) => `
           <div class="task-event ${event.stage === task.stage ? "active" : ""}">
@@ -456,16 +665,24 @@ function taskHtml(task) {
 }
 
 async function loadJobs() {
-  const data = await api("/api/jobs");
-  state.jobs = data.jobs || [];
-  renderJobList($("#jobList"), state.jobs);
+  try {
+    const data = await api("/api/jobs");
+    state.jobs = data.jobs || [];
+    renderJobList($("#jobList"), state.jobs);
+  } catch (error) {
+    renderJobList($("#jobList"), []);
+    showNotice(error.message, "error");
+  }
 }
 
 function renderJobList(container, jobs, options = {}) {
   if (!container) return;
   if (!jobs.length) {
     container.className = "job-list empty";
-    container.textContent = "暂无岗位记录";
+    container.innerHTML = emptyState(
+      "暂无岗位记录",
+      options.compact ? "完成一次搜索后，最新岗位会出现在这里。" : "去岗位搜索页启动一次搜索，Agent 会抓取并评分。"
+    );
     return;
   }
 
@@ -474,6 +691,7 @@ function renderJobList(container, jobs, options = {}) {
     .map((job) => {
       const match = job.match || {};
       const score = Number(match.score || 0);
+      const scoreClass = score >= 80 ? "" : score >= 60 ? "mid" : "low";
       const chips = [
         job.city,
         job.salary,
@@ -487,7 +705,7 @@ function renderJobList(container, jobs, options = {}) {
         <button class="job-card ${state.selectedJobId === job.id ? "active" : ""}" type="button" data-job-id="${escapeAttr(job.id)}">
           <span class="job-title">
             <span>${escapeHtml(job.title)} @ ${escapeHtml(job.company)}</span>
-            <span class="score">${score}</span>
+            <span class="score ${scoreClass}">${score}</span>
           </span>
           <span class="job-meta">${chips}</span>
           ${options.compact ? "" : `<span class="muted">${escapeHtml((match.reasoning || job.description || "").slice(0, 96))}</span>`}
@@ -580,16 +798,22 @@ async function generateForSelectedJob(jobId, button) {
 }
 
 async function loadVersions() {
-  const data = await api("/api/resume-versions");
-  state.versions = data.versions || [];
-  renderVersions();
+  try {
+    const data = await api("/api/resume-versions");
+    state.versions = data.versions || [];
+    renderVersions();
+  } catch (error) {
+    state.versions = [];
+    renderVersions();
+    showNotice(error.message, "error");
+  }
 }
 
 function renderVersions() {
   const container = $("#versionList");
   if (!state.versions.length) {
     container.className = "version-list empty";
-    container.textContent = "暂无简历版本";
+    container.innerHTML = emptyState("暂无简历版本", "在匹配详情中生成定制简历，或从模板生成器创建第一版。");
     return;
   }
   container.className = "version-list";
@@ -626,6 +850,12 @@ async function sendChat(event) {
 
   appendMessage("user", text);
   input.value = "";
+  const slashCommand = text.trimStart().split(/\s+/, 1)[0].toLowerCase();
+  if ((slashCommand === "/search" || slashCommand.startsWith("/search")) && !confirmBossSearch()) {
+    appendMessage("agent", "已取消搜索。可先运行 python scripts/login_boss.py 完成 Boss 登录，或确认后在 Chrome 中扫码。");
+    hideCommandMenu();
+    return;
+  }
   try {
     const result = await api("/api/chat", {
       method: "POST",
@@ -747,6 +977,7 @@ function appendMessage(role, text) {
 function renderSettings() {
   const health = state.health || {};
   const config = state.config || {};
+  if (!$("#settingDb")) return;
   $("#settingDb").textContent = config.db_path || health.db_path || "-";
   $("#settingBoss").textContent = health.boss_login_exists ? "已找到登录态" : "未找到登录态";
   $("#settingOpenai").textContent =
@@ -757,6 +988,9 @@ function renderSettings() {
         : "OpenAI-compatible 未配置";
   $("#settingFeishu").textContent = health.feishu_configured ? "已配置" : "未配置";
   $("#settingResume").textContent = health.resume_exists ? "已创建" : "未创建";
+  if (health.knowledge_ingest) {
+    $("#settingKnowledgeIngest").textContent = `${health.knowledge_ingest.chunks} chunks · ${health.knowledge_ingest.ingested_at}`;
+  }
 }
 
 function parseList(value) {
@@ -806,12 +1040,14 @@ function bindEvents() {
   $$("[data-view-jump]").forEach((button) => {
     button.addEventListener("click", () => switchView(button.dataset.viewJump));
   });
-  $("#refreshBtn").addEventListener("click", refreshAll);
-  $("#profileForm").addEventListener("submit", saveProfile);
-  $("#templateForm").addEventListener("submit", generateTemplate);
-  $("#searchForm").addEventListener("submit", runSearch);
-  $("#configForm").addEventListener("submit", saveConfig);
-  $("#refreshModelsBtn").addEventListener("click", async () => {
+  $("#refreshBtn")?.addEventListener("click", refreshAll);
+  $("#profileForm")?.addEventListener("submit", saveProfile);
+  $("#importResumeForm")?.addEventListener("submit", importResume);
+  $("#templateForm")?.addEventListener("submit", generateTemplate);
+  $("#searchForm")?.addEventListener("submit", runSearch);
+  $("#configForm")?.addEventListener("submit", saveConfig);
+  $("#ingestKnowledgeBtn")?.addEventListener("click", ingestKnowledge);
+  $("#refreshModelsBtn")?.addEventListener("click", async () => {
     const form = $("#configForm");
     const config = {
       ...(state.config || {}),
@@ -825,46 +1061,46 @@ function bindEvents() {
     await renderModelOptions(config);
     showNotice("模型选项已刷新");
   });
-  $("#configForm").model_provider.addEventListener("change", async () => {
+  $("#configForm")?.model_provider?.addEventListener("change", async () => {
     const form = $("#configForm");
     await renderModelOptions({ ...(state.config || {}), model_provider: form.model_provider.value, ollama_base_url: form.ollama_base_url.value });
   });
-  $("#configForm").ollama_base_url.addEventListener("change", async () => {
+  $("#configForm")?.ollama_base_url?.addEventListener("change", async () => {
     const form = $("#configForm");
     await renderModelOptions({ ...(state.config || {}), model_provider: form.model_provider.value, ollama_base_url: form.ollama_base_url.value });
   });
-  $("#chatForm").addEventListener("submit", sendChat);
-  $("#chatForm").message.addEventListener("input", updateCommandMenu);
-  $("#chatForm").message.addEventListener("keydown", (event) => {
+  $("#chatForm")?.addEventListener("submit", sendChat);
+  $("#chatForm")?.message?.addEventListener("input", updateCommandMenu);
+  $("#chatForm")?.message?.addEventListener("keydown", (event) => {
     if (event.key === "Escape") hideCommandMenu();
   });
-  $("#commandMenu").addEventListener("click", (event) => {
+  $("#commandMenu")?.addEventListener("click", (event) => {
     const option = event.target.closest("[data-command]");
     if (option) applyCommand(option.dataset.command);
   });
-  $("#reloadJobsBtn").addEventListener("click", loadJobs);
-  $("#reloadVersionsBtn").addEventListener("click", loadVersions);
+  $("#reloadJobsBtn")?.addEventListener("click", loadJobs);
+  $("#reloadVersionsBtn")?.addEventListener("click", loadVersions);
 
-  $("#jobList").addEventListener("click", (event) => {
+  $("#jobList")?.addEventListener("click", (event) => {
     const card = event.target.closest("[data-job-id]");
     if (card) selectJob(card.dataset.jobId);
   });
-  $("#latestJobs").addEventListener("click", (event) => {
+  $("#latestJobs")?.addEventListener("click", (event) => {
     const card = event.target.closest("[data-job-id]");
     if (card) {
       switchView("matches");
       selectJob(card.dataset.jobId);
     }
   });
-  $("#jobDetail").addEventListener("click", (event) => {
+  $("#jobDetail")?.addEventListener("click", (event) => {
     const button = event.target.closest("#jobResumeBtn");
     if (button) generateForSelectedJob(button.dataset.jobId, button);
   });
-  $("#versionList").addEventListener("click", (event) => {
+  $("#versionList")?.addEventListener("click", (event) => {
     const card = event.target.closest("[data-version-id]");
     if (card) selectVersion(card.dataset.versionId);
   });
-  $("#commandHints").addEventListener("click", (event) => {
+  $("#commandHints")?.addEventListener("click", (event) => {
     const button = event.target.closest(".prompt-chip");
     if (!button) return;
     applyCommand(button.dataset.command || button.textContent.trim().split(/\s+/, 1)[0]);

@@ -5,29 +5,42 @@ Reads documents from data/knowledge/ and indexes them into Chroma.
 
 Usage:
     python scripts/ingest_knowledge.py
+    python scripts/ingest_knowledge.py --dir data/knowledge/projects
 """
 
+import argparse
 import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config.logging import setup_logging
 from config.settings import settings
-from models.job import Job
-from models.match import MatchResult
+from rag.ingest import ingest_directory
+from storage.db import get_engine, record_knowledge_ingest
 
 
-def main():
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Ingest knowledge documents into Chroma")
+    parser.add_argument("--dir", default="", help="Knowledge directory (default: settings.knowledge_dir)")
+    args = parser.parse_args()
+
+    setup_logging()
+    get_engine(settings.db_path)
+
+    target = Path(args.dir) if args.dir else settings.knowledge_dir
     print("=" * 50)
-    print("Knowledge Ingestion (Phase 2)")
+    print("Knowledge Ingestion")
     print("=" * 50)
-    print(f"Knowledge dir: {settings.knowledge_dir}")
+    print(f"Knowledge dir: {target}")
     print(f"Chroma dir: {settings.chroma_dir}")
     print()
-    print("Not implemented yet — coming in Phase 2 (RAG).")
-    print("For now, place your markdown/text/PDF files in data/knowledge/ subdirectories.")
+
+    chunks = ingest_directory(target)
+    record_knowledge_ingest(chunks, str(target))
+    print(f"\nDone: indexed {chunks} chunks.")
+    return 0 if chunks >= 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
