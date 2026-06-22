@@ -12,16 +12,16 @@ def test_full_graph_with_mock_jobs(tmp_db_path):
     jobs = [
         Job(title="Linux BSP 开发", company="芯联科技", salary="15-25K", city="上海",
             description="熟悉 Linux 内核驱动开发，掌握 I2C/SPI/GPIO 等总线协议，有 device tree 经验",
-            url="https://www.zhipin.com/job/1"),
+            url="https://jobs.example.com/1"),
         Job(title="嵌入式驱动工程师", company="智微电子", salary="12-20K", city="深圳",
             description="STM32 ARM 平台开发，熟悉 platform driver，有 I2C/SPI 调试经验",
-            url="https://www.zhipin.com/job/2"),
+            url="https://jobs.example.com/2"),
         Job(title="Python 后端开发", company="云端科技", salary="30-50K", city="北京",
             description="要求精通微服务架构，熟悉 Kubernetes、Docker、gRPC",
-            url="https://www.zhipin.com/job/3"),
+            url="https://jobs.example.com/3"),
         Job(title="Linux 驱动实习生", company="开源芯", salary="200-350/天", city="杭州",
             description="了解 Linux kernel，有 I2C/GPIO/Device Tree 经验者优先",
-            url="https://www.zhipin.com/job/4"),
+            url="https://jobs.example.com/4"),
     ]
 
     graph = build_graph()
@@ -34,7 +34,6 @@ def test_full_graph_with_mock_jobs(tmp_db_path):
         "match_results": [],
         "optimized_resumes": [],
         "learning_plans": [],
-        "notified": [],
         "messages": [],
     }
     result = graph.invoke(state)

@@ -1,5 +1,5 @@
 """
-review_node.py — Quality check for optimized resumes before notification.
+review_node.py — Quality check for optimized resumes before persistence.
 """
 
 from models.agent_state import AgentState

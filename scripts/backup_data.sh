@@ -19,14 +19,8 @@ copy_if_exists() {
 
 echo "[backup] Writing to $DEST"
 copy_if_exists "$ROOT/data/jobmatch.db"
-copy_if_exists "$ROOT/data/boss_state.json"
 copy_if_exists "$ROOT/data/resume.json"
 copy_if_exists "$ROOT/storage/vector_store"
-
-if [ -d "$ROOT/data/task_screenshots" ]; then
-  cp -a "$ROOT/data/task_screenshots" "$DEST/"
-  echo "  + task_screenshots/"
-fi
 
 tar -czf "$DEST.tar.gz" -C "$BACKUP_ROOT" "$STAMP"
 rm -rf "$DEST"

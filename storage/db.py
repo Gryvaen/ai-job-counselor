@@ -1,6 +1,6 @@
 """
 SQLite persistence for JobMatch Agent.
-SQLAlchemy models + helper functions for jobs, matches, resume versions, notifications.
+SQLAlchemy models + helper functions for jobs, matches, resume versions, and learning plans.
 """
 
 import json
@@ -57,16 +57,6 @@ class ResumeVersionRecord(Base):
     created_at = Column(DateTime, default=datetime.now)
 
 
-class NotificationRecord(Base):
-    __tablename__ = "notifications"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    job_id = Column(String(32), nullable=False)
-    channel = Column(String(32), default="feishu")
-    payload = Column(Text)  # JSON
-    sent_at = Column(DateTime, default=datetime.now)
-
-
 class LearningPlanRecord(Base):
     __tablename__ = "learning_plans"
 
@@ -76,24 +66,6 @@ class LearningPlanRecord(Base):
     weekly_plan = Column(Text)  # JSON list
     estimated_hours = Column(Integer)
     created_at = Column(DateTime, default=datetime.now)
-
-
-class SearchTaskRecord(Base):
-    __tablename__ = "search_tasks"
-
-    task_id = Column(String(32), primary_key=True)
-    task_type = Column(String(32), default="job_search")
-    status = Column(String(16), default="queued")
-    stage = Column(String(32), default="queued")
-    progress = Column(Integer, default=0)
-    message = Column(Text, default="")
-    request_json = Column(Text, default="{}")
-    events_json = Column(Text, default="[]")
-    screenshot_path = Column(String(512), default="")
-    result_json = Column(Text, default="")
-    error = Column(Text, default="")
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now)
 
 
 class KnowledgeIngestRecord(Base):
@@ -131,21 +103,7 @@ def get_engine(db_path: Path | str) -> Any:
         _session_factory = sessionmaker(bind=_engine)
         Base.metadata.create_all(_engine)
         _run_schema_migrations(_engine)
-        _run_alembic_migrations(normalized_path)
     return _engine
-
-
-def _run_alembic_migrations(db_path: str) -> None:
-    try:
-        from alembic import command
-        from alembic.config import Config
-        from config.settings import PROJECT_ROOT
-
-        cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
-        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
-        command.upgrade(cfg, "head")
-    except Exception:
-        pass
 
 
 def get_session() -> Session:
@@ -202,14 +160,6 @@ def save_match(session: Session, match) -> None:
     session.add(record)
 
 
-def save_notification(session: Session, job_id: str, payload: dict, channel: str = "feishu") -> None:
-    record = NotificationRecord(
-        job_id=job_id, channel=channel,
-        payload=json.dumps(payload, ensure_ascii=False),
-    )
-    session.add(record)
-
-
 def save_resume_version(session: Session, resume, file_path: str = "", status: str = "draft") -> None:
     record = ResumeVersionRecord(
         job_id=resume.job_id,
@@ -258,95 +208,6 @@ def recent_scrape_exists(session: Session, keyword: str, city: str, hours: int =
     )
     needle = keyword.lower()
     return any(needle in f"{row.title} {row.description}".lower() for row in rows)
-
-
-# ---------------------------------------------------------------------------
-# Search task persistence
-# ---------------------------------------------------------------------------
-
-def _task_to_dict(record: SearchTaskRecord) -> dict:
-    return {
-        "id": record.task_id,
-        "type": record.task_type,
-        "status": record.status,
-        "stage": record.stage,
-        "progress": record.progress,
-        "message": record.message or "",
-        "request": json.loads(record.request_json or "{}"),
-        "events": json.loads(record.events_json or "[]"),
-        "login_screenshot": "",
-        "login_screenshot_url": (
-            f"/api/tasks/{record.task_id}/login-screenshot"
-            if record.screenshot_path else ""
-        ),
-        "result": json.loads(record.result_json) if record.result_json else None,
-        "error": record.error or "",
-        "created_at": record.created_at.isoformat(timespec="seconds") if record.created_at else "",
-        "updated_at": record.updated_at.isoformat(timespec="seconds") if record.updated_at else "",
-    }
-
-
-def create_search_task(task: dict) -> dict:
-    with get_session() as sess:
-        record = SearchTaskRecord(
-            task_id=task["id"],
-            task_type=task.get("type", "job_search"),
-            status=task.get("status", "queued"),
-            stage=task.get("stage", "queued"),
-            progress=int(task.get("progress", 0)),
-            message=task.get("message", ""),
-            request_json=json.dumps(task.get("request", {}), ensure_ascii=False),
-            events_json=json.dumps(task.get("events", []), ensure_ascii=False),
-            screenshot_path=task.get("screenshot_path", ""),
-            result_json=json.dumps(task["result"], ensure_ascii=False) if task.get("result") else "",
-            error=task.get("error", ""),
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-        )
-        sess.add(record)
-        sess.commit()
-        return _task_to_dict(record)
-
-
-def get_search_task(task_id: str) -> dict | None:
-    with get_session() as sess:
-        record = sess.get(SearchTaskRecord, task_id)
-        if not record:
-            return None
-        return _task_to_dict(record)
-
-
-def update_search_task(task_id: str, **fields) -> dict | None:
-    with get_session() as sess:
-        record = sess.get(SearchTaskRecord, task_id)
-        if not record:
-            return None
-        for key, value in fields.items():
-            if key == "request":
-                record.request_json = json.dumps(value, ensure_ascii=False)
-            elif key == "events":
-                record.events_json = json.dumps(value, ensure_ascii=False)
-            elif key == "result":
-                record.result_json = json.dumps(value, ensure_ascii=False) if value is not None else ""
-            elif key == "screenshot_path":
-                record.screenshot_path = value or ""
-            elif hasattr(record, key):
-                setattr(record, key, value)
-        record.updated_at = datetime.now()
-        sess.commit()
-        sess.refresh(record)
-        return _task_to_dict(record)
-
-
-def prune_search_tasks(ttl_seconds: int) -> int:
-    cutoff = datetime.now() - timedelta(seconds=ttl_seconds)
-    with get_session() as sess:
-        rows = sess.query(SearchTaskRecord).filter(SearchTaskRecord.updated_at < cutoff).all()
-        count = len(rows)
-        for row in rows:
-            sess.delete(row)
-        sess.commit()
-        return count
 
 
 def record_knowledge_ingest(chunks: int, source_dir: str) -> None:

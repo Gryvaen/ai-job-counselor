@@ -1,15 +1,10 @@
-"""FastAPI web console for the JobMatch Agent workspace."""
+"""FastAPI web console for the AI Agent interview workspace."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import asyncio
-import threading
-import time
-import uuid
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -26,33 +21,22 @@ from config.llm import llm_chat
 from config.logging import setup_logging
 from config.settings import settings
 from config.settings import PROJECT_ROOT
-from agent.nodes.plan_node import parse_job_query
-from models.agent_state import AgentState
 from models.job import Job
-from scraper import BossSession
-from scraper.session import BOSS_LOGIN_URL
+from models.match import MatchResult
 from storage.db import (
     JobRecord,
     LearningPlanRecord,
     MatchRecord,
     ResumeVersionRecord,
-    SearchTaskRecord,
-    create_search_task as db_create_search_task,
     get_engine,
-    get_search_task,
     get_session,
     latest_knowledge_ingest,
-    prune_search_tasks,
     record_knowledge_ingest,
-    update_search_task,
 )
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-TASK_SCREENSHOT_DIR = settings.task_screenshots_dir
-
-
 class ResumeGenerateRequest(BaseModel):
     name: str = ""
     email: str = ""
@@ -62,6 +46,7 @@ class ResumeGenerateRequest(BaseModel):
     target_role: str = Field(min_length=1)
     github_url: str = ""
     notes: str = ""
+    projects: str = ""
 
 
 class ResumeImportRequest(BaseModel):
@@ -98,25 +83,37 @@ class ResumeGenerateResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-class JobSearchRequest(BaseModel):
-    keywords: str = Field(min_length=1)
+class JobImportRequest(BaseModel):
+    title: str = Field(min_length=1)
+    company: str = Field(min_length=1)
+    salary: str = ""
     city: str = "全国"
-    threshold: int = Field(default=settings.match_threshold, ge=0, le=100)
+    description: str = Field(min_length=10)
+    url: str = ""
 
 
-class JobSearchResponse(BaseModel):
-    jobs_scraped: int
-    matches_scored: int
-    resumes_generated: int
-    notified: int
-    jobs: list[dict]
-    message: str
+class AnalysisRunRequest(BaseModel):
+    resume_text: str = Field(min_length=20)
+    jd_text: str = Field(min_length=20)
+    title: str = "目标岗位"
+    company: str = "目标公司"
+    city: str = "全国"
+    model: str = "rule"
 
 
-class SearchTaskCreateResponse(BaseModel):
-    task_id: str
-    status: str
-    message: str
+class AnalysisRunResponse(BaseModel):
+    job_id: str
+    title: str
+    company: str
+    match_score: int
+    matched_skills: list[str] = Field(default_factory=list)
+    missing_skills: list[str] = Field(default_factory=list)
+    relevant_experience: list[str] = Field(default_factory=list)
+    resume_advice: list[str] = Field(default_factory=list)
+    learning_plan: list[str] = Field(default_factory=list)
+    interview_questions: list[str] = Field(default_factory=list)
+    job_requirements: list[str] = Field(default_factory=list)
+    reasoning: str = ""
 
 
 class ChatRequest(BaseModel):
@@ -127,6 +124,26 @@ class ChatResponse(BaseModel):
     reply: str
     action: str
     data: dict = Field(default_factory=dict)
+
+
+class InterviewRequest(BaseModel):
+    target_role: str = Field(min_length=1)
+    skills: str = ""
+    projects: str = ""
+    answer: str = ""
+    history: list[dict] = Field(default_factory=list)
+
+
+class InterviewResponse(BaseModel):
+    question: str
+    feedback: list[str] = Field(default_factory=list)
+    focus: list[str] = Field(default_factory=list)
+    round: int = 1
+    stage: str = ""
+    score: int = 0
+    rubric: list[str] = Field(default_factory=list)
+    answer_shape: list[str] = Field(default_factory=list)
+    coverage: list[dict] = Field(default_factory=list)
 
 
 class ResumeProfileSaveRequest(BaseModel):
@@ -146,9 +163,7 @@ class AppConfig(BaseModel):
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
     ollama_model: str = "qwen2.5:7b"
     ollama_embedding_model: str = "nomic-embed-text"
-    feishu_webhook: str = ""
     resume_path: str = "data/resume.json"
-    boss_state_path: str = "data/boss_state.json"
     knowledge_dir: str = "data/knowledge"
     resume_versions_dir: str = "data/resume_versions"
     db_path: str = "data/jobmatch.db"
@@ -157,7 +172,6 @@ class AppConfig(BaseModel):
     rag_chunk_overlap: int = Field(default=64, ge=0, le=4096)
     rag_top_k: int = Field(default=5, ge=1, le=50)
     match_threshold: int = Field(default=75, ge=0, le=100)
-    boss_auto_open_browser: bool = True
     webui_api_token: str = ""
 
 
@@ -165,12 +179,6 @@ class KnowledgeIngestResponse(BaseModel):
     chunks: int
     source_dir: str
     message: str
-
-
-class PipelineRunRequest(BaseModel):
-    keywords: str = Field(min_length=1)
-    city: str = "全国"
-    threshold: int = Field(default=settings.match_threshold, ge=0, le=100)
 
 
 app = FastAPI(title="JobMatch Agent Web Console")
@@ -193,26 +201,7 @@ class ApiTokenMiddleware(BaseHTTPMiddleware):
 app.add_middleware(ApiTokenMiddleware)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-TASK_LOCK = threading.Lock()
-SEARCH_RUN_LOCK = threading.Lock()
-BOSS_LOGIN_LOCK = threading.Lock()
-BOSS_LOGIN_LOOP: asyncio.AbstractEventLoop | None = None
-BOSS_LOGIN_SESSION: BossSession | None = None
-BOSS_LOGIN_STOP: threading.Event | None = None
-BOSS_LOGIN_THREAD: threading.Thread | None = None
-TASK_TTL_SECONDS = 60 * 60 * 6
-BOSS_LOGIN_WAIT_SECONDS = 60 * 10
-
-
 SLASH_COMMANDS = [
-    {
-        "name": "/search",
-        "label": "搜索岗位",
-        "usage": "/search <city> <job> [score]",
-        "params": "<city> <job> [score]",
-        "example": "/search 上海 Linux驱动 BSP 80分以上",
-        "description": "打开 Boss 并按城市、关键词、匹配分运行完整岗位搜索。",
-    },
     {
         "name": "/status",
         "label": "查看状态",
@@ -259,7 +248,7 @@ SLASH_COMMANDS = [
         "usage": "/settings",
         "params": "",
         "example": "/settings",
-        "description": "跳转到模型、Boss 登录态和数据路径设置。",
+        "description": "跳转到模型和数据路径设置。",
     },
     {
         "name": "/help",
@@ -277,9 +266,6 @@ def startup() -> None:
     setup_logging()
     get_engine(settings.db_path)
     settings.resume_versions_dir.mkdir(parents=True, exist_ok=True)
-    settings.task_screenshots_dir.mkdir(parents=True, exist_ok=True)
-    _fail_interrupted_search_tasks()
-    prune_search_tasks(TASK_TTL_SECONDS)
     if settings.sentry_dsn:
         try:
             import sentry_sdk
@@ -302,57 +288,27 @@ def _check_db() -> tuple[bool, str]:
         return False, str(exc)
 
 
-def _fail_interrupted_search_tasks() -> None:
-    try:
-        with get_session() as sess:
-            rows = (
-                sess.query(SearchTaskRecord)
-                .filter(SearchTaskRecord.status.in_(("queued", "running")))
-                .all()
-            )
-            now = datetime.now()
-            for row in rows:
-                row.status = "failed"
-                row.stage = "failed"
-                row.progress = max(int(row.progress or 0), 1)
-                row.message = "服务已重启，旧搜索任务已停止。请重新发起搜索。"
-                row.error = row.message
-                row.updated_at = now
-            sess.commit()
-            if rows:
-                logger.info("Marked %d interrupted search tasks as failed.", len(rows))
-    except Exception as exc:
-        logger.warning("Failed to mark interrupted search tasks: %s", exc)
-
-
 def _check_chroma() -> tuple[bool, str]:
     try:
-        from rag.retriever import RAGRetriever
-        retriever = RAGRetriever()
-        retriever.list_sources()
-        return True, "ok"
+        settings.chroma_dir.mkdir(parents=True, exist_ok=True)
+        return True, f"ready: {settings.chroma_dir}"
     except Exception as exc:
         return False, str(exc)
 
 
-async def _check_ollama() -> tuple[bool, str]:
+def _check_ollama() -> tuple[bool, str]:
     if settings.model_provider.lower().strip() != "ollama":
         return True, "skipped"
-    url = settings.ollama_base_url.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{url}/models")
-            resp.raise_for_status()
-        return True, "ok"
-    except Exception as exc:
-        return False, str(exc)
+    if not settings.ollama_base_url or not settings.ollama_model:
+        return False, "ollama base url/model is not configured"
+    return True, "configured"
 
 
 @app.get("/api/health")
 async def health() -> dict:
     db_ok, db_msg = _check_db()
     chroma_ok, chroma_msg = _check_chroma()
-    ollama_ok, ollama_msg = await _check_ollama()
+    ollama_ok, ollama_msg = _check_ollama()
     checks = {
         "database": {"ok": db_ok, "detail": db_msg},
         "chroma": {"ok": chroma_ok, "detail": chroma_msg},
@@ -368,11 +324,9 @@ async def health() -> dict:
         "time": datetime.now().isoformat(timespec="seconds"),
         "db_path": str(settings.db_path),
         "resume_exists": settings.resume_path.exists(),
-        "boss_login_exists": BossSession(settings.boss_state_path).has_saved_login(),
         "openai_configured": bool(settings.openai_api_key),
         "model_provider": settings.model_provider,
         "ollama_configured": bool(settings.ollama_base_url and settings.ollama_model),
-        "feishu_configured": bool(settings.feishu_webhook),
         "auth_required": bool(settings.webui_api_token.strip()),
         "checks": checks,
         "knowledge_ingest": ingest,
@@ -382,120 +336,6 @@ async def health() -> dict:
 @app.get("/api/commands")
 def list_commands() -> dict:
     return {"commands": SLASH_COMMANDS}
-
-
-@app.post("/api/boss/login/start")
-def start_boss_login() -> dict:
-    global BOSS_LOGIN_THREAD
-    if not os.environ.get("DISPLAY"):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "当前 WebUI 运行环境没有可视化浏览器 DISPLAY，无法从容器里弹出 Boss 登录页。"
-                "请在宿主机项目目录运行 .venv/bin/python scripts/login_boss.py 完成登录，"
-                "登录态会写入 data/boss_state.json，当前搜索会检测到后继续。"
-            ),
-        )
-
-    with BOSS_LOGIN_LOCK:
-        if BOSS_LOGIN_THREAD and BOSS_LOGIN_THREAD.is_alive():
-            return {
-                "status": "opening",
-                "message": "Boss 登录页已打开。登录完成后请点击“已完成登录”。",
-            }
-
-    ready = threading.Event()
-    stop = threading.Event()
-    error: dict[str, str] = {}
-
-    def _login_worker() -> None:
-        global BOSS_LOGIN_LOOP, BOSS_LOGIN_SESSION, BOSS_LOGIN_STOP, BOSS_LOGIN_THREAD
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        session: BossSession | None = None
-
-        async def _wait_until_done() -> None:
-            assert session is not None
-            while not stop.is_set():
-                if session._chrome_process and session._chrome_process.poll() is not None:
-                    break
-                await asyncio.sleep(1)
-
-        async def _run() -> None:
-            global BOSS_LOGIN_LOOP, BOSS_LOGIN_SESSION, BOSS_LOGIN_STOP
-            nonlocal session
-            session = BossSession(
-                settings.boss_state_path,
-                restore_state=False,
-                fresh_login=False,
-            )
-            await session.start(headless=False, initial_url=BOSS_LOGIN_URL)
-            with BOSS_LOGIN_LOCK:
-                BOSS_LOGIN_LOOP = loop
-                BOSS_LOGIN_SESSION = session
-                BOSS_LOGIN_STOP = stop
-            ready.set()
-            await _wait_until_done()
-
-        try:
-            loop.run_until_complete(_run())
-        except Exception as exc:
-            error["message"] = str(exc)
-            ready.set()
-            logger.exception("Boss login helper failed")
-        finally:
-            async def _run() -> None:
-                if session:
-                    await session.close()
-            try:
-                loop.run_until_complete(_run())
-            except Exception:
-                logger.exception("Boss login cleanup failed")
-            with BOSS_LOGIN_LOCK:
-                if BOSS_LOGIN_LOOP is loop:
-                    BOSS_LOGIN_LOOP = None
-                    BOSS_LOGIN_SESSION = None
-                    BOSS_LOGIN_STOP = None
-                    BOSS_LOGIN_THREAD = None
-            loop.close()
-
-    thread = threading.Thread(target=_login_worker, name="jobmatch-boss-login", daemon=True)
-    with BOSS_LOGIN_LOCK:
-        BOSS_LOGIN_THREAD = thread
-    thread.start()
-    if not ready.wait(timeout=15):
-        raise HTTPException(status_code=504, detail="打开 Boss 登录浏览器超时，请稍后重试。")
-    if error:
-        raise HTTPException(status_code=500, detail=error["message"])
-    return {
-        "status": "opening",
-        "message": "已打开 Boss 登录页。请手动完成登录，然后点击“已完成登录”。",
-    }
-
-
-@app.post("/api/boss/login/save")
-def save_boss_login() -> dict:
-    with BOSS_LOGIN_LOCK:
-        loop = BOSS_LOGIN_LOOP
-        session = BOSS_LOGIN_SESSION
-        stop = BOSS_LOGIN_STOP
-    if not loop or not session:
-        raise HTTPException(status_code=409, detail="Boss 登录浏览器未打开，请先点击“打开 Boss 登录页”。")
-
-    try:
-        future = asyncio.run_coroutine_threadsafe(session.save_current_login(), loop)
-        saved = future.result(timeout=15)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"保存 Boss 登录态失败: {exc}") from exc
-
-    if not saved:
-        raise HTTPException(
-            status_code=409,
-            detail="没有读到 Boss 登录 cookie。请确认已在刚弹出的 Boss 浏览器窗口中完成登录。",
-        )
-    if stop:
-        stop.set()
-    return {"status": "saved", "message": "Boss 登录态已保存，搜索任务会自动继续。"}
 
 
 @app.get("/api/config", response_model=AppConfig)
@@ -564,29 +404,16 @@ def ingest_knowledge() -> KnowledgeIngestResponse:
 
 @app.get("/api/knowledge/status")
 def knowledge_status() -> dict:
-    from rag.retriever import RAGRetriever
-
     ingest = latest_knowledge_ingest()
-    sources = RAGRetriever().list_sources()
+    sources = []
+    if ingest:
+        sources = [{"source": ingest["source_dir"], "type": "latest_ingest"}]
     return {
         "knowledge_dir": str(settings.knowledge_dir),
         "latest_ingest": ingest,
         "indexed_sources": len(sources),
         "sources": sources[:20],
     }
-
-
-@app.post("/api/run", response_model=JobSearchResponse)
-def run_pipeline(payload: PipelineRunRequest) -> JobSearchResponse:
-    keywords = _parse_keywords(payload.keywords)
-    if not keywords:
-        raise HTTPException(status_code=400, detail="请输入至少一个岗位关键词")
-    return _run_job_search(
-        keywords=keywords,
-        city=payload.city or "全国",
-        threshold=payload.threshold,
-        user_query=payload.keywords,
-    )
 
 
 @app.put("/api/config")
@@ -666,7 +493,7 @@ def import_resume(payload: ResumeImportRequest) -> ResumeImportResponse:
         profile=profile,
         saved_path=str(settings.resume_path),
         extracted=extracted,
-        message="已从传入简历生成新的简历事实档案，后续 /search 和定制简历都会使用这份档案。",
+        message="已从传入简历生成新的简历事实档案，后续定制简历会使用这份档案。",
     )
 
 
@@ -682,7 +509,7 @@ async def generate_resume(payload: ResumeGenerateRequest) -> ResumeGenerateRespo
             warnings.append(warning)
     markdown = _build_resume_markdown(payload, skills, projects)
     saved_path = _save_generated_resume(payload.target_role, markdown)
-    gaps = _infer_gaps(payload.target_role, skills, projects)
+    gaps = _infer_gaps(payload.target_role, skills, projects, payload.projects)
     return ResumeGenerateResponse(
         markdown=markdown,
         skills=skills,
@@ -694,321 +521,57 @@ async def generate_resume(payload: ResumeGenerateRequest) -> ResumeGenerateRespo
     )
 
 
-@app.post("/api/jobs/search", response_model=JobSearchResponse)
-def search_jobs(payload: JobSearchRequest) -> JobSearchResponse:
-    keywords = _parse_keywords(payload.keywords)
-    if not keywords:
-        raise HTTPException(status_code=400, detail="请输入至少一个岗位关键词")
+@app.post("/api/interview/next", response_model=InterviewResponse)
+def next_interview_question(payload: InterviewRequest) -> InterviewResponse:
+    return _build_interview_turn(payload)
 
-    return _run_job_search(
-        keywords=keywords,
-        city=payload.city or "全国",
-        threshold=payload.threshold,
-        user_query=payload.keywords,
+
+@app.post("/api/jobs/import")
+def import_job(payload: JobImportRequest) -> dict:
+    from storage.db import save_job
+
+    job = Job(
+        title=payload.title.strip(),
+        company=payload.company.strip(),
+        salary=payload.salary.strip(),
+        city=payload.city.strip() or "全国",
+        description=payload.description.strip(),
+        url=payload.url.strip(),
     )
-
-
-@app.post("/api/jobs/search/tasks", response_model=SearchTaskCreateResponse)
-def create_search_task_endpoint(payload: JobSearchRequest) -> SearchTaskCreateResponse:
-    keywords = _parse_keywords(payload.keywords)
-    if not keywords:
-        raise HTTPException(status_code=400, detail="请输入至少一个岗位关键词")
-
-    task_id = uuid.uuid4().hex
-    task = {
-        "id": task_id,
-        "type": "job_search",
-        "status": "queued",
-        "stage": "queued",
-        "progress": 0,
-        "message": "任务已排队，等待 Agent 开始搜索。",
-        "request": {
-            "keywords": keywords,
-            "city": payload.city or "全国",
-            "threshold": payload.threshold,
-            "user_query": payload.keywords,
-        },
-        "events": [],
-        "login_screenshot": "",
-        "login_screenshot_url": "",
-        "result": None,
-        "error": "",
-        "created_at": _now_iso(),
-        "updated_at": _now_iso(),
-    }
-    with TASK_LOCK:
-        prune_search_tasks(TASK_TTL_SECONDS)
-        db_create_search_task(task)
-    _append_task_event(task_id, "queued", 0, "任务已排队，等待 Agent 开始搜索。")
-    try:
-        _start_search_task(task_id)
-    except Exception as exc:
-        _fail_task(task_id, f"搜索任务启动失败: {exc}")
-    return SearchTaskCreateResponse(
-        task_id=task_id,
-        status="queued",
-        message="搜索任务已创建。",
-    )
-
-
-@app.get("/api/tasks/{task_id}")
-def get_task(task_id: str) -> dict:
-    task = get_search_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在或已过期")
-    return task
-
-
-@app.get("/api/tasks/{task_id}/login-screenshot")
-def get_task_login_screenshot(task_id: str) -> FileResponse:
-    path = TASK_SCREENSHOT_DIR / f"{task_id}.png"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="登录截图不存在")
-    return FileResponse(path, media_type="image/png")
-
-
-def _run_job_search(
-    keywords: list[str],
-    city: str,
-    threshold: int,
-    user_query: str,
-) -> JobSearchResponse:
-    try:
-        from agent.graph import build_graph
-
-        graph = build_graph()
-        state: AgentState = {
-            "user_query": user_query,
-            "keywords": keywords,
-            "city": city,
-            "threshold": threshold,
-            "jobs": [],
-            "retrieved_context": [],
-            "match_results": [],
-            "optimized_resumes": [],
-            "learning_plans": [],
-            "notified": [],
-            "messages": [],
-        }
-        result = graph.invoke(state)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"岗位搜索流水线失败: {exc}") from exc
-
     with get_session() as sess:
-        jobs = _jobs_with_matches(sess, limit=30)
+        save_job(sess, job)
+        sess.commit()
+    return {"job": job.model_dump(mode="json"), "message": "岗位 JD 已保存到本地岗位库。"}
 
-    return JobSearchResponse(
-        jobs_scraped=len(result.get("jobs", [])),
-        matches_scored=len(result.get("match_results", [])),
-        resumes_generated=len(result.get("optimized_resumes", [])),
-        notified=len(result.get("notified", [])),
-        jobs=jobs,
-        message=f"已完成 {city} · {', '.join(keywords)} 搜索和匹配。",
+
+@app.post("/api/analysis/run", response_model=AnalysisRunResponse)
+def run_analysis(payload: AnalysisRunRequest) -> AnalysisRunResponse:
+    from storage.db import save_job, save_match
+
+    analysis = _analyze_resume_jd(payload)
+    job = Job(
+        title=payload.title.strip() or analysis["title"],
+        company=payload.company.strip() or analysis["company"],
+        salary="",
+        city=payload.city.strip() or "全国",
+        description=payload.jd_text.strip(),
+        url="",
     )
-
-
-def _boss_state_stamp() -> tuple[int, int] | None:
-    try:
-        stat = settings.boss_state_path.stat()
-        return (stat.st_mtime_ns, stat.st_size)
-    except FileNotFoundError:
-        return None
-
-
-def _wait_for_boss_login(
-    task_id: str,
-    *,
-    require_state_change: bool = False,
-    previous_stamp: tuple[int, int] | None = None,
-) -> None:
-    if not require_state_change and BossSession(settings.boss_state_path).has_saved_login():
-        return
-
-    _append_task_event(
-        task_id,
-        "login",
-        10,
-        "需要先登录 Boss。请点击任务中的“打开 Boss 登录页”，并在浏览器里手动完成登录。",
+    match = MatchResult(
+        job_id=job.id,
+        score=analysis["match_score"],
+        advantages=analysis["matched_skills"] + analysis["relevant_experience"][:3],
+        missing=analysis["missing_skills"],
+        suggest=_score_suggestion(analysis["match_score"]),
+        rag_evidence=analysis["relevant_experience"][:3],
+        reasoning=analysis["reasoning"],
     )
-    deadline = time.monotonic() + BOSS_LOGIN_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        state_changed = _boss_state_stamp() != previous_stamp
-        if BossSession(settings.boss_state_path).has_saved_login() and (
-            not require_state_change or state_changed
-        ):
-            _append_task_event(task_id, "login", 18, "已检测到 Boss 登录态，继续搜索。")
-            return
-        time.sleep(2)
-
-    raise RuntimeError("等待 Boss 登录超时，请重新发起搜索并点击“打开 Boss 登录页”完成登录。")
-
-
-def _run_search_task(task_id: str) -> None:
-    acquired = SEARCH_RUN_LOCK.acquire(blocking=False)
-    if not acquired:
-        _append_task_event(task_id, "waiting", 2, "已有搜索任务正在运行，本任务等待上一轮结束。")
-        SEARCH_RUN_LOCK.acquire()
-
-    task = get_search_task(task_id)
-    if not task:
-        SEARCH_RUN_LOCK.release()
-        return
-    request = dict(task["request"])
-
-    try:
-        _append_task_event(task_id, "starting", 4, "Agent 线程已启动，正在准备搜索环境。")
-        _wait_for_boss_login(task_id)
-        result = _run_job_search_with_progress(
-            keywords=request["keywords"],
-            city=request["city"],
-            threshold=request["threshold"],
-            user_query=request["user_query"],
-            progress=lambda stage, pct, msg: _append_task_event(task_id, stage, pct, msg),
-            login_wait_callback=lambda previous_stamp=None: _wait_for_boss_login(
-                task_id,
-                require_state_change=previous_stamp is not None,
-                previous_stamp=previous_stamp,
-            ),
-            login_screenshot_callback=lambda image: _update_task_login_screenshot(task_id, image),
-            login_started_callback=lambda: _append_task_event(
-                task_id,
-                "login",
-                20,
-                "Boss 登录态失效。请点击任务中的“打开 Boss 登录页”，并在浏览器里手动完成登录。",
-            ),
-        )
-        update_search_task(
-            task_id,
-            status="completed",
-            stage="completed",
-            progress=100,
-            message=result.message,
-            result=result.model_dump(),
-        )
-        _append_task_event(task_id, "completed", 100, result.message)
-    except Exception as exc:
-        logger.exception("Search task %s failed", task_id)
-        _fail_task(task_id, f"搜索失败: {exc}")
-    finally:
-        SEARCH_RUN_LOCK.release()
-
-
-def _start_search_task(task_id: str) -> None:
-    thread = threading.Thread(
-        target=_run_search_task,
-        args=(task_id,),
-        name=f"jobmatch-search-{task_id[:8]}",
-        daemon=True,
-    )
-    thread.start()
-
-
-def _fail_task(task_id: str, message: str) -> None:
-    task = get_search_task(task_id)
-    if not task:
-        return
-    progress = max(int(task.get("progress", 0)), 1)
-    update_search_task(
-        task_id,
-        status="failed",
-        stage="failed",
-        progress=progress,
-        message=message,
-        error=message,
-    )
-    _append_task_event(task_id, "failed", 100, message)
-
-
-def _run_job_search_with_progress(
-    keywords: list[str],
-    city: str,
-    threshold: int,
-    user_query: str,
-    progress,
-    login_wait_callback=None,
-    login_screenshot_callback=None,
-    login_started_callback=None,
-) -> JobSearchResponse:
-    from agent.nodes.match_node import match_node
-    from agent.nodes.notify_node import notify_node
-    from agent.nodes.optimize_node import optimize_node
-    from agent.nodes.plan_node import plan_node
-    from agent.nodes.record_node import record_node
-    from agent.nodes.retrieve_node import retrieve_node
-    from agent.nodes.review_node import review_node
-    from agent.nodes.scrape_node import scrape_node
-
-    state: AgentState = {
-        "user_query": user_query,
-        "keywords": keywords,
-        "city": city,
-        "threshold": threshold,
-        "jobs": [],
-        "retrieved_context": [],
-        "match_results": [],
-        "optimized_resumes": [],
-        "learning_plans": [],
-        "notified": [],
-        "messages": [],
-        "login_screenshot_callback": login_screenshot_callback,
-        "login_started_callback": login_started_callback,
-    }
-
-    def apply_update(update: dict | None) -> None:
-        if update:
-            state.update(update)
-
-    progress("planning", 8, f"解析搜索意图: {city} · {', '.join(keywords)}")
-    apply_update(plan_node(state))
-
-    progress("scraping", 18, "打开 Boss 并检索岗位。若登录态失效，任务会提示你手动登录。")
-    previous_stamp = _boss_state_stamp()
-    scrape_update = scrape_node(state)
-    apply_update(scrape_update)
-    scrape_error = scrape_update.get("scrape_error", "")
-    if scrape_error == "login_required" and login_wait_callback:
-        progress("login", 20, "Boss 登录态失效。请点击任务中的“打开 Boss 登录页”，并在浏览器里手动完成登录。")
-        login_wait_callback(previous_stamp)
-        progress("scraping", 24, "已检测到新的 Boss 登录态，正在重新检索岗位。")
-        scrape_update = scrape_node(state)
-        apply_update(scrape_update)
-        scrape_error = scrape_update.get("scrape_error", "")
-    if scrape_error == "no_jobs_found":
-        progress("scraping", 22, "Boss 未返回岗位，可能登录失效或页面结构变化。请检查 data/debug/ 调试产物。")
-    elif scrape_error:
-        raise RuntimeError(f"Boss 采集失败: {scrape_error}")
-
-    progress("retrieving", 45, f"抓取到 {len(state.get('jobs', []))} 个新岗位，正在检索个人知识库证据。")
-    apply_update(retrieve_node(state))
-
-    progress("matching", 62, "正在计算岗位与简历事实档案的匹配分。")
-    apply_update(match_node(state))
-
-    high = [r for r in state.get("match_results", []) if r.score >= threshold]
-    if high:
-        progress("optimizing", 76, f"发现 {len(high)} 个高匹配岗位，正在生成定制简历和学习计划。")
-        apply_update(optimize_node(state))
-        progress("reviewing", 86, "正在复核简历草稿、ATS 覆盖和待核实内容。")
-        apply_update(review_node(state))
-        progress("notifying", 93, "正在发送通知并准备写入记录。")
-        apply_update(notify_node(state))
-    else:
-        progress("reviewing", 82, "暂无达到阈值的岗位，跳过简历生成并准备写入记录。")
-
-    progress("recording", 96, "正在保存岗位、匹配结果、简历版本和学习计划。")
-    apply_update(record_node(state))
-
     with get_session() as sess:
-        jobs = _jobs_with_matches(sess, limit=30)
+        save_job(sess, job)
+        save_match(sess, match)
+        sess.commit()
 
-    return JobSearchResponse(
-        jobs_scraped=len(state.get("jobs", [])),
-        matches_scored=len(state.get("match_results", [])),
-        resumes_generated=len(state.get("optimized_resumes", [])),
-        notified=len(state.get("notified", [])),
-        jobs=jobs,
-        message=f"已完成 {city} · {', '.join(keywords)} 搜索和匹配。",
-    )
+    return AnalysisRunResponse(job_id=job.id, **analysis)
 
 
 @app.get("/api/jobs")
@@ -1130,12 +693,8 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     context_parts: list[str] = []
 
     if any(word in text for word in ["找工作", "搜岗位", "搜索岗位", "找岗位"]):
-        keywords, city, threshold = _parse_search_intent(text)
-        action = "suggest_search"
-        data = {"keywords": ",".join(keywords), "city": city, "threshold": threshold}
         context_parts.append(
-            f"用户想找岗位。建议关键词: {', '.join(keywords)}，城市: {city}，匹配阈值: {threshold}。"
-            "可引导使用 /search 命令启动搜索。"
+            "用户想找岗位，但岗位搜索功能已删除。可以引导用户手动导入目标 JD，再查看已有匹配结果或生成定制简历。"
         )
 
     elif any(word in text for word in ["改简历", "优化简历", "修改简历", "简历模板"]):
@@ -1162,14 +721,6 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     if reply:
         return ChatResponse(action=action, reply=reply, data=data)
 
-    if action == "suggest_search":
-        keywords = data.get("keywords", "").split(",")
-        city = data.get("city", "全国")
-        return ChatResponse(
-            action=action,
-            reply=f"我建议搜索 {city} 的这些关键词: {', '.join(keywords)}。输入 /search 启动搜索。（LLM 未配置或不可用）",
-            data=data,
-        )
     if action == "resume_advice":
         return ChatResponse(
             action=action,
@@ -1204,29 +755,6 @@ def _handle_slash_command(text: str) -> ChatResponse:
         lines = ["可用指令:"]
         lines.extend(f"{item['usage']} - {item['description']}" for item in SLASH_COMMANDS)
         return ChatResponse(action="help", reply="\n".join(lines), data={"commands": SLASH_COMMANDS})
-
-    if command == "/search":
-        keywords, city, threshold = _parse_search_intent(args)
-        if not keywords:
-            raise HTTPException(status_code=400, detail="请在 /search 后输入岗位关键词，例如 /search 上海 Linux驱动 BSP")
-        task = create_search_task_endpoint(JobSearchRequest(
-            keywords=",".join(keywords),
-            city=city,
-            threshold=threshold,
-        ))
-        return ChatResponse(
-            action="search_started",
-            reply=(
-                f"已启动搜索任务: {city} · {', '.join(keywords)}。\n"
-                "我会在下方显示进度，完成后自动切到匹配结果。"
-            ),
-            data={
-                "task_id": task.task_id,
-                "keywords": ",".join(keywords),
-                "city": city,
-                "threshold": threshold,
-            },
-        )
 
     if command == "/status":
         data = dashboard()
@@ -1275,48 +803,6 @@ def _resolve_slash_command(command: str) -> str:
     return matches[0] if len(matches) == 1 else command
 
 
-def _append_task_event(task_id: str, stage: str, progress: int, message: str) -> None:
-    event = {
-        "stage": stage,
-        "progress": max(0, min(100, int(progress))),
-        "message": message,
-        "time": _now_iso(),
-    }
-    with TASK_LOCK:
-        task = get_search_task(task_id)
-        if not task:
-            return
-        events = list(task.get("events", []))
-        events.append(event)
-        events = events[-30:]
-        status = task.get("status", "queued")
-        if status not in {"failed", "completed"}:
-            status = "running" if stage != "queued" else "queued"
-        update_search_task(
-            task_id,
-            status=status,
-            stage=stage,
-            progress=event["progress"],
-            message=message,
-            events=events,
-        )
-
-
-def _update_task_login_screenshot(task_id: str, image: bytes) -> None:
-    TASK_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    path = TASK_SCREENSHOT_DIR / f"{task_id}.png"
-    path.write_bytes(image)
-    current = get_search_task(task_id) or {}
-    update_search_task(
-        task_id,
-        status="running",
-        stage="login",
-        progress=max(int(current.get("progress", 0)), 20),
-        message="等待 Boss 登录。请在浏览器中手动完成登录，登录成功后任务会继续。",
-        screenshot_path=str(path),
-    )
-
-
 def _mask_secret(value: str, keep_end: int = 4) -> str:
     value = (value or "").strip()
     if not value:
@@ -1353,9 +839,7 @@ CONFIG_ENV_KEYS = {
     "ollama_base_url": "OLLAMA_BASE_URL",
     "ollama_model": "OLLAMA_MODEL",
     "ollama_embedding_model": "OLLAMA_EMBEDDING_MODEL",
-    "feishu_webhook": "FEISHU_WEBHOOK",
     "resume_path": "RESUME_PATH",
-    "boss_state_path": "BOSS_STATE_PATH",
     "knowledge_dir": "KNOWLEDGE_DIR",
     "resume_versions_dir": "RESUME_VERSIONS_DIR",
     "db_path": "DB_PATH",
@@ -1364,18 +848,15 @@ CONFIG_ENV_KEYS = {
     "rag_chunk_overlap": "RAG_CHUNK_OVERLAP",
     "rag_top_k": "RAG_TOP_K",
     "match_threshold": "MATCH_THRESHOLD",
-    "boss_auto_open_browser": "BOSS_AUTO_OPEN_BROWSER",
     "webui_api_token": "WEBUI_API_TOKEN",
 }
 
 
 def _settings_to_config(mask_secrets: bool = True) -> AppConfig:
     api_key = settings.openai_api_key
-    webhook = settings.feishu_webhook
     token = settings.webui_api_token
     if mask_secrets:
         api_key = _mask_api_key(api_key)
-        webhook = _mask_secret(webhook)
         token = _mask_secret(token) if token else ""
     return AppConfig(
         model_provider=settings.model_provider,
@@ -1386,9 +867,7 @@ def _settings_to_config(mask_secrets: bool = True) -> AppConfig:
         ollama_base_url=settings.ollama_base_url,
         ollama_model=settings.ollama_model,
         ollama_embedding_model=settings.ollama_embedding_model,
-        feishu_webhook=webhook,
         resume_path=_display_path(settings.resume_path),
-        boss_state_path=_display_path(settings.boss_state_path),
         knowledge_dir=_display_path(settings.knowledge_dir),
         resume_versions_dir=_display_path(settings.resume_versions_dir),
         db_path=_display_path(settings.db_path),
@@ -1397,7 +876,6 @@ def _settings_to_config(mask_secrets: bool = True) -> AppConfig:
         rag_chunk_overlap=settings.rag_chunk_overlap,
         rag_top_k=settings.rag_top_k,
         match_threshold=settings.match_threshold,
-        boss_auto_open_browser=settings.boss_auto_open_browser,
         webui_api_token=token,
     )
 
@@ -1412,12 +890,9 @@ def _apply_config(config: AppConfig) -> None:
     settings.ollama_base_url = config.ollama_base_url.strip()
     settings.ollama_model = config.ollama_model.strip()
     settings.ollama_embedding_model = config.ollama_embedding_model.strip()
-    if config.feishu_webhook.strip() and not config.feishu_webhook.strip().startswith("*"):
-        settings.feishu_webhook = config.feishu_webhook.strip()
     if config.webui_api_token.strip() and not config.webui_api_token.strip().startswith("*"):
         settings.webui_api_token = config.webui_api_token.strip()
     settings.resume_path = _resolve_config_path(config.resume_path)
-    settings.boss_state_path = _resolve_config_path(config.boss_state_path)
     settings.knowledge_dir = _resolve_config_path(config.knowledge_dir)
     settings.resume_versions_dir = _resolve_config_path(config.resume_versions_dir)
     settings.db_path = _resolve_config_path(config.db_path)
@@ -1426,7 +901,6 @@ def _apply_config(config: AppConfig) -> None:
     settings.rag_chunk_overlap = config.rag_chunk_overlap
     settings.rag_top_k = config.rag_top_k
     settings.match_threshold = config.match_threshold
-    settings.boss_auto_open_browser = config.boss_auto_open_browser
 
 
 def _write_env(config: AppConfig) -> None:
@@ -1608,13 +1082,388 @@ def _json_list(raw: str | None) -> list:
     return value if isinstance(value, list) else [value]
 
 
-def _parse_keywords(raw: str) -> list[str]:
-    return list(dict.fromkeys(p.strip() for p in re.split(r"[,，、\s\n]+", raw) if p.strip()))
+ANALYSIS_SKILLS = [
+    "Python", "FastAPI", "Django", "Flask", "SQLAlchemy", "PostgreSQL", "SQLite",
+    "MySQL", "Redis", "Docker", "Kubernetes", "Linux", "Git", "CI/CD",
+    "React", "Vue", "TypeScript", "JavaScript", "TailwindCSS", "HTML", "CSS",
+    "LangGraph", "LangChain", "RAG", "ChromaDB", "向量数据库", "Embedding",
+    "OpenAI", "Claude", "Qwen", "DeepSeek", "LLM", "Agent", "Prompt",
+    "PyTorch", "TensorFlow", "机器学习", "NLP", "数据分析", "Pandas",
+    "C", "C++", "Java", "Go", "Rust", "微服务", "REST", "WebSocket",
+    "测试", "部署", "监控", "性能优化",
+]
 
 
-def _parse_search_intent(text: str) -> tuple[list[str], str, int]:
-    keywords, city, parsed_threshold = parse_job_query(text)
-    return keywords, city, parsed_threshold or settings.match_threshold
+def _analyze_resume_jd(payload: AnalysisRunRequest) -> dict:
+    resume_text = payload.resume_text.strip()
+    jd_text = payload.jd_text.strip()
+    title = payload.title.strip() or _infer_title(jd_text)
+    company = payload.company.strip() or "目标公司"
+    resume_skills = _extract_known_skills(resume_text)
+    jd_skills = _extract_known_skills(jd_text)
+    requirements = _extract_requirements(jd_text, jd_skills)
+    matched = [skill for skill in jd_skills if _skill_in_text(skill, resume_text)]
+    missing = [skill for skill in jd_skills if skill not in matched]
+    relevant = _relevant_experience(resume_text, matched or jd_skills)
+
+    requirement_score = min(45, round((len(matched) / max(1, len(jd_skills))) * 45))
+    evidence_score = min(30, len(relevant) * 8 + min(6, len(resume_skills)))
+    baseline_score = 20 if resume_text and jd_text else 0
+    bonus = 5 if any(word in resume_text.lower() for word in ["上线", "部署", "生产", "production", "用户", "性能"]) else 0
+    score = max(0, min(100, baseline_score + requirement_score + evidence_score + bonus))
+    if not jd_skills and requirements:
+        score = max(35, min(72, 35 + len(relevant) * 7))
+
+    advice = _resume_advice(title, matched, missing, relevant)
+    plan = _learning_plan(missing)
+    questions = _interview_questions(title, matched, missing, requirements)
+    reasoning = (
+        f"matched_skills={len(matched)}, missing_skills={len(missing)}, "
+        f"relevant_experience={len(relevant)}, requirement_score={requirement_score}, "
+        f"evidence_score={evidence_score}, bonus={bonus}"
+    )
+    return {
+        "title": title,
+        "company": company,
+        "match_score": score,
+        "matched_skills": matched[:12],
+        "missing_skills": missing[:10],
+        "relevant_experience": relevant[:6],
+        "resume_advice": advice,
+        "learning_plan": plan,
+        "interview_questions": questions,
+        "job_requirements": requirements[:8],
+        "reasoning": reasoning,
+    }
+
+
+def _infer_title(jd_text: str) -> str:
+    first_line = next((line.strip() for line in jd_text.splitlines() if line.strip()), "")
+    if 2 <= len(first_line) <= 40 and not first_line.endswith(("。", ".", "；", ";")):
+        return first_line
+    return "目标岗位"
+
+
+def _extract_known_skills(text: str) -> list[str]:
+    return [skill for skill in ANALYSIS_SKILLS if _skill_in_text(skill, text)]
+
+
+def _skill_in_text(skill: str, text: str) -> bool:
+    lower = text.lower()
+    needle = skill.lower()
+    if re.fullmatch(r"[a-z0-9+#./-]+", needle):
+        return bool(re.search(rf"(?<![a-z0-9+#./-]){re.escape(needle)}(?![a-z0-9+#./-])", lower))
+    return needle in lower
+
+
+def _extract_requirements(jd_text: str, jd_skills: list[str]) -> list[str]:
+    lines = []
+    for raw in jd_text.splitlines():
+        line = raw.strip(" \t-•*0123456789.、")
+        if 8 <= len(line) <= 140 and any(token in line for token in ["要求", "熟悉", "掌握", "负责", "经验", "能力", "优先", "需要"]):
+            lines.append(line)
+    skill_requirements = [f"具备 {skill} 相关经验" for skill in jd_skills]
+    return list(dict.fromkeys(lines + skill_requirements))
+
+
+def _relevant_experience(resume_text: str, target_skills: list[str]) -> list[str]:
+    chunks = re.split(r"[\n。；;]+", resume_text)
+    scored = []
+    for chunk in chunks:
+        item = chunk.strip(" -•\t")
+        if len(item) < 12:
+            continue
+        hits = [skill for skill in target_skills if _skill_in_text(skill, item)]
+        if hits or any(word in item for word in ["项目", "系统", "平台", "服务", "模块", "优化", "开发", "实现"]):
+            scored.append((len(hits), len(item), item[:180]))
+    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [item for _, _, item in scored[:6]]
+
+
+def _resume_advice(title: str, matched: list[str], missing: list[str], relevant: list[str]) -> list[str]:
+    advice = []
+    if matched:
+        advice.append(f"在简历摘要和技能栈前 1/3 位置突出 {', '.join(matched[:5])}，让 ATS 与面试官快速看到岗位关键词。")
+    if relevant:
+        advice.append("将最相关项目改写为“背景-职责-技术方案-量化结果”结构，并明确你个人负责的模块。")
+    if missing:
+        advice.append(f"对 {', '.join(missing[:4])} 标注为学习中或补充可验证项目，避免直接写成已熟练掌握。")
+    advice.append(f"围绕 {title} 准备 2-3 个可展开的项目故事，覆盖技术选型、问题排查和结果复盘。")
+    return advice[:5]
+
+
+def _learning_plan(missing: list[str]) -> list[str]:
+    if not missing:
+        return ["第1周：整理岗位相关项目证据和量化指标。", "第2周：准备技术复盘和行为面试答案。"]
+    return [
+        f"第1周：补齐 {', '.join(missing[:2])} 基础概念，并完成官方教程或最小 Demo。",
+        f"第2周：把 {missing[0]} 接入一个个人项目，形成可截图、可运行、可讲解的作品。",
+        "第3周：整理项目 README、架构图和问题排查记录，用于简历与面试展开。",
+        "第4周：用目标 JD 复盘缺口，进行 2 轮模拟面试并修订简历表达。",
+    ]
+
+
+def _interview_questions(title: str, matched: list[str], missing: list[str], requirements: list[str]) -> list[str]:
+    focus = matched[:3] or missing[:3] or ["项目架构", "技术选型", "问题排查"]
+    questions = [f"请介绍一个最能证明你适合 {title} 的项目，你负责了哪些关键模块？"]
+    questions.extend([f"你在项目中如何使用或理解 {skill}？遇到过什么具体问题？" for skill in focus])
+    if requirements:
+        questions.append(f"JD 提到“{requirements[0][:36]}”，你会如何证明自己具备这项能力？")
+    if missing:
+        questions.append(f"如果入职后需要快速补齐 {missing[0]}，你会如何安排前两周学习和交付？")
+    return questions[:6]
+
+
+AGENT_INTERVIEW_STAGES = [
+    {
+        "name": "项目真实性",
+        "focus": ["项目背景", "个人职责", "业务指标", "上线结果"],
+        "rubric": ["能讲清问题背景和用户价值", "能区分团队成果与个人贡献", "能给出可验证结果"],
+        "shape": ["背景和目标", "你的职责边界", "核心方案", "结果和复盘"],
+    },
+    {
+        "name": "Agent 编排",
+        "focus": ["LangGraph", "状态机", "Planner/Executor", "多步任务"],
+        "rubric": ["能解释状态、节点和边的设计", "能说明失败重试和中断恢复", "能比较工作流与自由 Agent 的取舍"],
+        "shape": ["任务拆解", "状态定义", "节点职责", "失败处理"],
+    },
+    {
+        "name": "RAG 与知识库",
+        "focus": ["Embedding", "向量数据库", "Chunking", "Rerank", "引用证据"],
+        "rubric": ["能说明召回、精排和上下文拼装", "能处理幻觉和证据不足", "能设计检索评估指标"],
+        "shape": ["数据入库", "召回策略", "上下文构造", "评估与改进"],
+    },
+    {
+        "name": "工具调用",
+        "focus": ["Function Calling", "MCP", "工具权限", "参数校验", "幂等性"],
+        "rubric": ["能设计工具 schema 和错误返回", "能处理权限、超时和重试", "能避免危险工具误调用"],
+        "shape": ["工具边界", "输入输出 schema", "异常路径", "安全策略"],
+    },
+    {
+        "name": "记忆与上下文",
+        "focus": ["短期记忆", "长期记忆", "摘要压缩", "会话状态"],
+        "rubric": ["能区分消息历史、用户画像和任务状态", "能控制上下文窗口成本", "能说明隐私和过期策略"],
+        "shape": ["记忆类型", "写入触发", "读取排序", "清理策略"],
+    },
+    {
+        "name": "评估与安全",
+        "focus": ["Eval", "测试集", "Guardrail", "幻觉检测", "Prompt 注入"],
+        "rubric": ["能建立离线和在线评估", "能定义成功率、事实性和成本指标", "能处理 prompt 注入和越权"],
+        "shape": ["风险清单", "评估样本", "指标阈值", "拦截与回退"],
+    },
+    {
+        "name": "工程化部署",
+        "focus": ["FastAPI", "Docker", "队列", "监控", "CI/CD", "成本"],
+        "rubric": ["能设计 API、异步任务和持久化", "能说明日志、追踪和告警", "能考虑限流、缓存和模型降级"],
+        "shape": ["服务架构", "数据流", "部署运维", "成本和降级"],
+    },
+    {
+        "name": "系统设计",
+        "focus": ["端到端架构", "多 Agent 协作", "人机协同", "产品闭环"],
+        "rubric": ["能把需求拆成可交付模块", "能识别复杂度和边界", "能提出可验证迭代路线"],
+        "shape": ["需求澄清", "模块架构", "关键链路", "里程碑"],
+    },
+]
+
+
+AGENT_TECH_KEYWORDS = [
+    "Python", "FastAPI", "LangGraph", "LangChain", "RAG", "Embedding", "向量数据库",
+    "ChromaDB", "Milvus", "FAISS", "Rerank", "Function Calling", "MCP", "Tool",
+    "OpenAI", "Claude", "Qwen", "DeepSeek", "LLM", "Prompt", "Agent", "Planner",
+    "Executor", "Memory", "Eval", "Guardrail", "Docker", "Kubernetes", "Redis",
+    "PostgreSQL", "SQLite", "SQLAlchemy", "队列", "监控", "日志", "CI/CD",
+]
+
+
+def _build_interview_turn(payload: InterviewRequest) -> InterviewResponse:
+    skills = _parse_skills(payload.skills)
+    projects = _parse_project_lines(payload.projects)
+    answer = payload.answer.strip()
+    round_no = len(payload.history or []) + 1
+    stage = AGENT_INTERVIEW_STAGES[(round_no - 1) % len(AGENT_INTERVIEW_STAGES)]
+    coverage = _agent_tech_coverage(skills, payload.projects, payload.history, answer)
+    feedback = _interview_feedback(answer, skills, projects, stage, coverage) if answer else []
+    score = _score_interview_answer(answer, skills, projects, stage) if answer else 0
+    focus = _interview_focus(payload.target_role, skills, projects, answer, stage, coverage)
+
+    context = f"""你是 AI Agent 面试官，正在模拟中文技术面试。
+目标岗位: {payload.target_role}
+当前阶段: {stage['name']}
+必须考察: {', '.join(stage['focus'])}
+候选人技能: {', '.join(skills) or '未填写'}
+项目经历:
+{payload.projects.strip() or '未填写'}
+上一轮回答:
+{answer or '这是第一轮，请开场提问'}
+已覆盖技术: {', '.join(item['name'] for item in coverage if item['covered']) or '暂无'}
+
+请输出一个具体、可回答的下一题。要求:
+1. 只问一个问题。
+2. 围绕当前阶段追问，不要泛泛而谈。
+3. 尽量覆盖 AI Agent 岗位能力: Agent 编排、RAG、工具调用、记忆、评估、安全、部署。
+3. 不要替候选人编造经历。
+"""
+    llm_question = llm_chat(
+        "请给出下一道模拟面试问题，只输出问题本身。",
+        context=context,
+    )
+    question = (llm_question or "").strip()
+    if not question:
+        question = _fallback_interview_question(payload.target_role, skills, projects, answer, round_no)
+
+    return InterviewResponse(
+        question=question,
+        feedback=feedback,
+        focus=focus,
+        round=round_no,
+        stage=stage["name"],
+        score=score,
+        rubric=stage["rubric"],
+        answer_shape=stage["shape"],
+        coverage=coverage,
+    )
+
+
+def _interview_feedback(
+    answer: str,
+    skills: list[str],
+    projects: list[str],
+    stage: dict,
+    coverage: list[dict],
+) -> list[str]:
+    feedback = []
+    if len(answer) < 40:
+        feedback.append("回答偏短，可以补充背景、你的职责、技术方案和结果。")
+    if not re.search(r"\d|%|ms|qps|用户|耗时|提升|降低|减少|增长", answer, re.I):
+        feedback.append("建议加入可验证指标，例如性能、规模、耗时、准确率或交付结果。")
+    if projects and not any(project[:8] in answer for project in projects):
+        feedback.append("可以明确关联一个项目，说明你本人负责的模块和边界。")
+    matched = [skill for skill in skills if _skill_in_text(skill, answer)]
+    if skills and not matched:
+        feedback.append("回答里还没有体现核心技能关键词，可以自然带出相关技术栈。")
+    stage_hits = [item for item in stage["focus"] if _skill_in_text(item, answer)]
+    if not stage_hits:
+        feedback.append(f"这一轮重点是{stage['name']}，建议直接回应 {', '.join(stage['focus'][:3])}。")
+    missing_core = [item["name"] for item in coverage if not item["covered"]][:3]
+    if missing_core:
+        feedback.append(f"后续还需要覆盖 {', '.join(missing_core)}，这是 AI Agent 岗位常见追问点。")
+    if not feedback:
+        feedback.append("回答结构清楚，下一步可以准备更深入的取舍、排查和复盘细节。")
+    return feedback[:4]
+
+
+def _interview_focus(
+    role: str,
+    skills: list[str],
+    projects: list[str],
+    answer: str,
+    stage: dict,
+    coverage: list[dict],
+) -> list[str]:
+    focus = list(stage["focus"][:3])
+    if skills:
+        focus.extend([skill for skill in skills[:4] if skill not in focus])
+    if projects:
+        focus.append("项目细节")
+    if any(word in role.lower() for word in ["agent", "ai", "llm", "rag"]):
+        focus.extend(["Agent 设计", "RAG 评估", "工具调用"])
+    if answer and not re.search(r"为什么|取舍|权衡|trade", answer, re.I):
+        focus.append("技术取舍")
+    focus.extend(item["name"] for item in coverage if not item["covered"])
+    return list(dict.fromkeys(focus))[:5]
+
+
+def _fallback_interview_question(
+    role: str,
+    skills: list[str],
+    projects: list[str],
+    answer: str,
+    round_no: int,
+) -> str:
+    project = projects[0] if projects else "你最有代表性的项目"
+    skill = skills[(round_no - 1) % len(skills)] if skills else "核心技术栈"
+    stage = AGENT_INTERVIEW_STAGES[(round_no - 1) % len(AGENT_INTERVIEW_STAGES)]
+    stage_focus = "、".join(stage["focus"][:3])
+    questions = [
+        f"请用 2 分钟介绍一个最能证明你适合 {role} 的项目，重点讲你的职责、技术方案和结果。",
+        f"在 {project} 中，如果要用 LangGraph 或类似状态机编排 Agent，你会如何定义状态、节点和失败重试？",
+        f"请设计 {project} 的 RAG 链路：文档如何切分、召回如何评估、回答如何附带证据？",
+        f"如果 Agent 需要调用外部工具，你会如何设计 tool schema、权限校验、超时重试和幂等性？",
+        f"你会如何为 {project} 建立 Eval 和 Guardrail，覆盖幻觉、Prompt 注入、越权工具调用和成本失控？",
+        f"如果把 {project} 部署到生产环境，你会如何设计 FastAPI 服务、任务队列、日志追踪、监控告警和模型降级？",
+        f"围绕{stage['name']}，请结合 {stage_focus} 讲一个具体方案或经历。",
+    ]
+    if answer and len(answer) > 20:
+        return f"你刚才的回答放到{stage['name']}场景下，最难验证的假设是什么？你会用什么数据、日志或实验确认它是对的？"
+    return questions[(round_no - 1) % len(questions)]
+
+
+def _score_interview_answer(answer: str, skills: list[str], projects: list[str], stage: dict) -> int:
+    if not answer:
+        return 0
+    score = 35
+    if len(answer) >= 80:
+        score += 15
+    if re.search(r"\d|%|ms|qps|用户|耗时|提升|降低|减少|增长", answer, re.I):
+        score += 15
+    if any(_skill_in_text(skill, answer) for skill in skills + stage["focus"]):
+        score += 15
+    if projects and any(project[:8] in answer for project in projects):
+        score += 10
+    if re.search(r"取舍|权衡|为什么|替代|trade|风险|回退|降级|监控|评估", answer, re.I):
+        score += 10
+    return max(0, min(100, score))
+
+
+def _agent_tech_coverage(
+    skills: list[str],
+    projects_text: str,
+    history: list[dict],
+    answer: str,
+) -> list[dict]:
+    corpus = "\n".join(
+        [
+            ", ".join(skills),
+            projects_text or "",
+            answer or "",
+            "\n".join(f"{item.get('question', '')}\n{item.get('answer', '')}" for item in history or []),
+        ]
+    )
+    groups = [
+        ("LLM/Prompt", ["LLM", "Prompt", "OpenAI", "Claude", "Qwen", "DeepSeek"]),
+        ("Agent 编排", ["Agent", "LangGraph", "Planner", "Executor", "状态机", "多 Agent"]),
+        ("RAG", ["RAG", "Embedding", "向量数据库", "ChromaDB", "Milvus", "FAISS", "Rerank"]),
+        ("工具调用", ["Function Calling", "MCP", "Tool", "工具", "schema"]),
+        ("记忆", ["Memory", "记忆", "会话", "上下文", "摘要"]),
+        ("评估安全", ["Eval", "评估", "Guardrail", "幻觉", "注入", "安全"]),
+        ("工程部署", ["FastAPI", "Docker", "Kubernetes", "监控", "日志", "CI/CD", "Redis", "队列"]),
+    ]
+    return [
+        {
+            "name": name,
+            "covered": any(_skill_in_text(alias, corpus) for alias in aliases),
+        }
+        for name, aliases in groups
+    ]
+
+
+def _parse_project_lines(value: str) -> list[str]:
+    lines = []
+    for line in str(value or "").splitlines():
+        item = line.strip(" -•\t")
+        if item:
+            lines.append(item[:120])
+    if not lines and value.strip():
+        lines = [part.strip()[:120] for part in re.split(r"[;；。]", value) if part.strip()]
+    return lines[:8]
+
+
+def _score_suggestion(score: int) -> str:
+    if score >= 80:
+        return "推荐投递"
+    if score >= 60:
+        return "观望"
+    return "不推荐"
 
 
 def _empty_resume_profile() -> dict:
@@ -1918,6 +1767,7 @@ def _build_resume_markdown(
     )
     role = payload.target_role.strip()
     project_lines = [_project_bullet(project, role, skills) for project in projects]
+    project_lines.extend(_manual_project_bullets(payload.projects, role, skills))
     if not project_lines:
         project_lines = [
             f"- **项目名称待补充**: 围绕 {role} 的核心能力构建可展示项目，突出问题背景、技术方案、量化结果和代码链接。"
@@ -1966,8 +1816,28 @@ def _project_bullet(project: GithubProject, role: str, skills: list[str]) -> str
     )
 
 
-def _infer_gaps(role: str, skills: list[str], projects: list[GithubProject]) -> list[str]:
-    text = " ".join([role, *skills, *(p.language for p in projects), *(p.description for p in projects)]).lower()
+def _manual_project_bullets(projects_text: str, role: str, skills: list[str]) -> list[str]:
+    bullets = []
+    skill_text = "、".join(skills[:5]) or "岗位相关技术栈"
+    for line in _parse_project_lines(projects_text):
+        if "：" in line or ":" in line:
+            name, desc = re.split(r"[:：]", line, 1)
+        else:
+            name, desc = line[:24], line
+        bullets.append(
+            f"- **{name.strip() or '项目'}**: {desc.strip()}。面向 {role} 可突出 {skill_text}、个人职责、技术难点和可量化结果。"
+        )
+    return bullets[:8]
+
+
+def _infer_gaps(role: str, skills: list[str], projects: list[GithubProject], projects_text: str = "") -> list[str]:
+    text = " ".join([
+        role,
+        projects_text,
+        *skills,
+        *(p.language for p in projects),
+        *(p.description for p in projects),
+    ]).lower()
     expected = {
         "前端": ["React/Vue", "TypeScript", "性能优化", "组件化"],
         "后端": ["数据库", "缓存", "接口设计", "部署运维"],

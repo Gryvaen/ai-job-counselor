@@ -3,29 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0f172a" />
-    <title>JobMatch · AI 求职工作台</title>
+    <meta name="theme-color" content="#102019" />
+    <title>AI Agent 面试机器人</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-mark">J</span>
+          <span class="brand-mark">AI</span>
           <div>
-            <strong>JobMatch</strong>
-            <small>AI 求职工作台</small>
+            <strong>AI Agent 面试机器人</strong>
+            <small>Agent 技术栈模拟面试</small>
           </div>
         </div>
 
         <nav class="nav" aria-label="主导航">
-          <button class="nav-item active" data-view="dashboard" type="button"><span>概览</span><small>Pipeline</small></button>
-          <button class="nav-item" data-view="chat" type="button"><span>对话助手</span><small>Command</small></button>
-          <button class="nav-item" data-view="profile" type="button"><span>我的简历</span><small>Profile</small></button>
-          <button class="nav-item" data-view="search" type="button"><span>岗位搜索</span><small>Search</small></button>
-          <button class="nav-item" data-view="matches" type="button"><span>匹配结果</span><small>Matches</small></button>
-          <button class="nav-item" data-view="versions" type="button"><span>简历版本</span><small>Versions</small></button>
-          <button class="nav-item" data-view="settings" type="button"><span>设置</span><small>Deploy</small></button>
+          <button class="nav-item active" data-view="resume" type="button"><span>候选人档案</span><small>Profile</small></button>
+          <button class="nav-item" data-view="interview" type="button"><span>Agent 面试</span><small>Interview</small></button>
         </nav>
 
         <div class="sidebar-status">
@@ -36,14 +31,6 @@
               <small id="healthMeta">正在连接后端</small>
             </div>
           </div>
-
-          <button id="bossLoginCard" class="system-card boss-login-card" type="button" data-boss-login title="点击打开 Boss 登录页">
-            <span id="bossLoginDot" class="dot warn"></span>
-            <div>
-              <strong id="bossLoginText">Boss 未登录</strong>
-              <small id="bossLoginMeta">搜索前需扫码登录</small>
-            </div>
-          </button>
         </div>
       </aside>
 
@@ -51,294 +38,125 @@
         <header class="topbar">
           <div>
             <p class="eyebrow">Personal AI Job Agent</p>
-            <h1 id="pageTitle">概览</h1>
+            <h1 id="pageTitle">候选人档案</h1>
           </div>
           <div class="top-actions">
-            <button id="refreshBtn" class="secondary-btn" type="button">刷新数据</button>
-            <button data-view-jump="search" type="button">开始搜索</button>
+            <button id="refreshBtn" class="secondary-btn" type="button">刷新</button>
+            <button data-view-jump="interview" type="button">开始模拟面试</button>
           </div>
         </header>
 
         <section id="notice" class="notice hidden"></section>
 
-        <section id="dashboard" class="view active">
+        <section id="resume" class="view active">
           <div class="hero-panel">
             <div>
-              <p class="eyebrow">Agent Pipeline</p>
-              <h2>从简历事实、岗位抓取到匹配解释，一处完成。</h2>
-              <p>先建立可信简历档案，再让 Agent 搜索岗位、评分、生成定制版本。所有投递动作仍由你确认。</p>
-            </div>
-            <div class="hero-actions">
-              <button data-view-jump="profile" type="button">完善档案</button>
-              <button class="secondary-btn light" data-view-jump="chat" type="button">询问 Agent</button>
+              <p class="eyebrow">Resume Builder</p>
+              <h2>把技能、项目和证据整理成 AI Agent 面试上下文。</h2>
+              <p>先生成一份可用的候选人档案，再进入模拟面试。面试官会围绕 Agent 编排、RAG、工具调用、记忆、评估、安全和部署连续追问。</p>
             </div>
           </div>
 
-          <div class="metric-grid">
-            <article class="metric"><span>岗位</span><strong id="metricJobs">0</strong><small>已抓取职位</small></article>
-            <article class="metric"><span>匹配</span><strong id="metricMatches">0</strong><small>已完成评分</small></article>
-            <article class="metric"><span>简历版本</span><strong id="metricResumes">0</strong><small>定制输出</small></article>
-            <article class="metric"><span>学习计划</span><strong id="metricPlans">0</strong><small>技能补齐</small></article>
-          </div>
-
-          <div class="split">
-            <section class="panel">
+          <div class="workspace-grid">
+            <form id="resumeForm" class="panel form-panel">
               <div class="section-head">
                 <div>
-                  <p class="section-kicker">Recent</p>
-                  <h2>最近岗位</h2>
+                  <p class="section-kicker">Input</p>
+                  <h2>候选人信息</h2>
                 </div>
-                <button class="link-btn" data-view-jump="matches" type="button">查看全部</button>
+                <button id="generateResumeBtn" type="submit">生成候选人档案</button>
               </div>
-              <div id="latestJobs" class="job-list empty">暂无岗位记录</div>
-            </section>
 
-            <section class="panel">
+              <div class="field-grid">
+                <label><span>姓名</span><input name="name" placeholder="你的姓名" /></label>
+                <label><span>目标岗位</span><input name="target_role" required placeholder="AI Agent 工程师" /></label>
+                <label><span>邮箱</span><input name="email" placeholder="you@example.com" /></label>
+                <label><span>电话</span><input name="phone" placeholder="13800000000" /></label>
+                <label><span>城市</span><input name="location" placeholder="上海" /></label>
+                <label><span>GitHub 主页</span><input name="github_url" placeholder="https://github.com/yourname" /></label>
+              </div>
+
+              <label><span>技能，一行一个或逗号分隔</span><textarea name="skills" rows="5" placeholder="Python, FastAPI, LangGraph, RAG, Docker"></textarea></label>
+              <label><span>项目经历，每行一个项目</span><textarea name="projects" rows="8" placeholder="AI 面试官系统：基于 FastAPI + LLM 实现多轮追问、反馈和会话状态管理"></textarea></label>
+              <label><span>补充亮点</span><textarea name="notes" rows="4" placeholder="竞赛、开源、论文、实习成果、量化指标等"></textarea></label>
+            </form>
+
+            <section class="panel detail-panel">
               <div class="section-head compact">
                 <div>
-                  <p class="section-kicker">Next</p>
-                  <h2>下一步</h2>
+                  <p class="section-kicker">Preview</p>
+                  <h2>生成结果</h2>
                 </div>
+                <button id="copyResumeBtn" class="secondary-btn" type="button">复制 Markdown</button>
               </div>
-              <div class="action-stack">
-                <button data-view-jump="profile" type="button">完善简历事实档案</button>
-                <button data-view-jump="search" type="button">搜索目标岗位</button>
-                <button class="secondary-btn" data-view-jump="settings" type="button">检查上线配置</button>
-              </div>
+              <pre id="resumePreview" class="markdown-preview">生成后会在这里预览 Markdown 候选人档案。</pre>
+              <div id="resumeGaps" class="gap-list"></div>
             </section>
           </div>
         </section>
 
-        <section id="chat" class="view">
-          <div class="chat-layout">
+        <section id="interview" class="view">
+          <div class="hero-panel interview-hero">
+            <div>
+              <p class="eyebrow">AI Agent Interviewer</p>
+              <h2>按真实 AI Agent 岗位能力图谱连续追问。</h2>
+              <p>系统会覆盖 LLM 应用、Agent 编排、RAG、工具调用、记忆、评估安全和工程化部署，并给出每轮评分与答题结构。</p>
+            </div>
+          </div>
+
+          <div class="interview-layout">
+            <form id="interviewSetupForm" class="panel form-panel">
+              <div class="section-head">
+                <div>
+                  <p class="section-kicker">Setup</p>
+                  <h2>面试背景</h2>
+                </div>
+                <button id="startInterviewBtn" type="submit">开始面试</button>
+              </div>
+              <label><span>目标岗位</span><input name="target_role" required placeholder="AI Agent 工程师" /></label>
+              <label><span>技能栈</span><textarea name="skills" rows="5" placeholder="Python, RAG, LangGraph, SQL, Docker"></textarea></label>
+              <label><span>项目经历</span><textarea name="projects" rows="8" placeholder="项目名：你的职责、技术方案、难点和结果"></textarea></label>
+            </form>
+
             <section class="panel chat-panel">
               <div class="section-head compact">
                 <div>
-                  <p class="section-kicker">Command Center</p>
-                  <h2>对话助手</h2>
+                  <p class="section-kicker">Interview</p>
+                  <h2>模拟面试</h2>
                 </div>
+                <button id="resetInterviewBtn" class="secondary-btn" type="button">重置</button>
               </div>
-              <div id="chatLog" class="chat-log">
-                <div class="message agent">我可以帮你搜岗位、解释匹配、生成定制简历。输入 / 选择模式，选中命令后会显示参数提示。</div>
+              <div id="interviewLog" class="chat-log">
+                <div class="message agent">填写左侧背景后开始面试。我会先确认项目真实性，再追问 Agent 编排、RAG、工具调用、评估安全和部署。</div>
               </div>
-              <div id="activeTaskPanel" class="task-panel hidden"></div>
-              <form id="chatForm" class="chat-form">
-                <div class="command-input-wrap">
-                  <input name="message" placeholder="输入 / 选择模式，或直接描述你的求职指令" autocomplete="off" />
-                  <div id="commandMenu" class="command-menu hidden" role="listbox"></div>
-                  <div id="commandParams" class="command-params hidden"></div>
+              <aside id="interviewCoach" class="interview-coach">
+                <div>
+                  <span>阶段</span>
+                  <strong id="stageLabel">待开始</strong>
                 </div>
-                <button type="submit">发送</button>
+                <div>
+                  <span>上一轮评分</span>
+                  <strong id="scoreLabel">--</strong>
+                </div>
+                <div>
+                  <span>答题结构</span>
+                  <div id="answerShape" class="mini-list"></div>
+                </div>
+                <div>
+                  <span>能力覆盖</span>
+                  <div id="coverageList" class="coverage-list"></div>
+                </div>
+                <div>
+                  <span>评分标准</span>
+                  <div id="rubricList" class="mini-list"></div>
+                </div>
+              </aside>
+              <form id="answerForm" class="chat-form">
+                <textarea name="answer" rows="3" placeholder="在这里回答当前问题"></textarea>
+                <button id="sendAnswerBtn" type="submit">提交回答</button>
               </form>
             </section>
-
-            <aside class="panel">
-              <p class="section-kicker">Shortcuts</p>
-              <h2>Slash 指令</h2>
-              <div id="commandHints" class="hint-list">
-                <button class="prompt-chip" type="button">/search &lt;city&gt; &lt;job&gt; [score]</button>
-                <button class="prompt-chip" type="button">/resume &lt;target_role&gt;</button>
-                <button class="prompt-chip" type="button">/status</button>
-              </div>
-            </aside>
           </div>
-        </section>
-
-        <section id="profile" class="view">
-          <div class="split wide-left">
-            <form id="profileForm" class="panel form-panel">
-              <div class="section-head">
-                <div>
-                  <p class="section-kicker">Source of Truth</p>
-                  <h2>简历事实档案</h2>
-                </div>
-                <button id="saveProfileBtn" type="submit">保存档案</button>
-              </div>
-              <div class="field-grid">
-                <label><span>姓名</span><input name="name" /></label>
-                <label><span>城市</span><input name="location" /></label>
-                <label><span>邮箱</span><input name="email" /></label>
-                <label><span>电话</span><input name="phone" /></label>
-              </div>
-              <label><span>技能，一行一个或逗号分隔</span><textarea name="skills" rows="5"></textarea></label>
-              <label><span>目标岗位</span><textarea name="target_roles" rows="3"></textarea></label>
-              <label><span>目标城市</span><textarea name="cities" rows="2"></textarea></label>
-              <label><span>项目经历 JSON</span><textarea name="projects" rows="8" spellcheck="false"></textarea></label>
-              <label><span>工作/实习经历 JSON</span><textarea name="experience" rows="6" spellcheck="false"></textarea></label>
-            </form>
-
-            <div class="side-stack">
-              <section class="panel">
-                <p class="section-kicker">Import</p>
-                <h2>简历导入</h2>
-                <form id="importResumeForm" class="stacked-form">
-                  <label><span>粘贴过往简历、项目经历、Markdown 或 JSON</span><textarea name="content" rows="9" required placeholder="例如：个人信息、技能、项目经历、工作/实习经历"></textarea></label>
-                  <label><span>目标岗位，一行一个或逗号分隔</span><input name="target_roles" placeholder="AI Agent 工程师, Python 后端" /></label>
-                  <label><span>目标城市</span><input name="cities" placeholder="上海, 杭州" /></label>
-                  <button id="importResumeBtn" type="submit">生成事实档案</button>
-                </form>
-              </section>
-
-              <section class="panel">
-                <p class="section-kicker">Generator</p>
-                <h2>模板生成器</h2>
-                <form id="templateForm" class="stacked-form">
-                  <label><span>目标岗位</span><input name="target_role" required placeholder="嵌入式 Linux 驱动工程师" /></label>
-                  <label><span>GitHub 主页</span><input name="github_url" placeholder="https://github.com/yourname" /></label>
-                  <label><span>补充亮点</span><textarea name="notes" rows="4"></textarea></label>
-                  <button id="generateTemplateBtn" type="submit">生成模板</button>
-                </form>
-              </section>
-            </div>
-          </div>
-        </section>
-
-        <section id="search" class="view">
-          <div id="bossSearchBanner" class="boss-search-banner hidden" role="status"></div>
-          <div class="split wide-left">
-            <form id="searchForm" class="panel form-panel">
-              <div>
-                <p class="section-kicker">Search Run</p>
-                <h2>岗位搜索</h2>
-                <p class="panel-hint">流程：AI 解析意图 → 在 Chrome 可视化搜索岗位 → 查看匹配结果，投递需你自行确认。</p>
-              </div>
-              <label><span>关键词</span><input name="keywords" required placeholder="Linux驱动,BSP,嵌入式" /></label>
-              <label><span>城市</span><input name="city" placeholder="上海" value="全国" /></label>
-              <label><span>最低匹配分</span><input name="threshold" type="number" min="0" max="100" value="75" /></label>
-              <button id="searchBtn" type="submit">开始搜索并匹配</button>
-            </form>
-
-            <section class="panel">
-              <p class="section-kicker">Runtime</p>
-              <h2>运行结果</h2>
-              <div id="searchResult" class="result-box">尚未运行</div>
-            </section>
-          </div>
-        </section>
-
-        <section id="matches" class="view">
-          <div class="match-layout">
-            <section class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="section-kicker">Ranked</p>
-                  <h2>匹配结果</h2>
-                </div>
-                <button id="reloadJobsBtn" class="secondary-btn" type="button">重新加载</button>
-              </div>
-              <div id="jobList" class="job-list empty">暂无岗位记录</div>
-            </section>
-
-            <section class="panel detail-panel">
-              <div id="jobDetail" class="detail-empty">选择一个岗位查看详情</div>
-            </section>
-          </div>
-        </section>
-
-        <section id="versions" class="view">
-          <div class="match-layout">
-            <section class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="section-kicker">Drafts</p>
-                  <h2>简历版本</h2>
-                </div>
-                <button id="reloadVersionsBtn" class="secondary-btn" type="button">重新加载</button>
-              </div>
-              <div id="versionList" class="version-list empty">暂无简历版本</div>
-            </section>
-
-            <section class="panel detail-panel">
-              <pre id="versionPreview" class="markdown-preview">选择一个版本预览 Markdown</pre>
-            </section>
-          </div>
-        </section>
-
-        <section id="settings" class="view">
-          <form id="configForm" class="settings-form">
-            <section class="panel form-panel">
-              <div class="section-head">
-                <div>
-                  <p class="section-kicker">Production</p>
-                  <h2>模型与通知</h2>
-                </div>
-                <button id="saveConfigBtn" type="submit">保存全部配置</button>
-              </div>
-              <label>
-                <span>模型提供商</span>
-                <select name="model_provider">
-                  <option value="openai">OpenAI / 兼容 API</option>
-                  <option value="ollama">本地 Ollama</option>
-                </select>
-              </label>
-              <label><span>OpenAI API Key</span><input name="openai_api_key" type="password" autocomplete="off" /></label>
-              <div class="field-grid">
-                <label><span>OpenAI Base URL</span><input name="openai_base_url" placeholder="https://api.openai.com/v1" /></label>
-                <label><span>Chat Model</span><select name="openai_model"></select></label>
-              </div>
-              <div class="field-grid">
-                <label><span>Embedding Model</span><select name="openai_embedding_model"></select></label>
-                <label><span>飞书 Webhook</span><input name="feishu_webhook" type="password" autocomplete="off" /></label>
-              </div>
-              <div class="field-grid">
-                <label><span>Ollama Base URL</span><input name="ollama_base_url" placeholder="http://127.0.0.1:11434/v1" /></label>
-                <label><span>Ollama Chat Model</span><select name="ollama_model"></select></label>
-              </div>
-              <div class="field-grid">
-                <label><span>Ollama Embedding Model</span><select name="ollama_embedding_model"></select></label>
-                <label class="button-field"><span>模型列表</span><button id="refreshModelsBtn" class="secondary-btn" type="button">刷新模型选项</button></label>
-              </div>
-            </section>
-
-            <section class="panel form-panel">
-              <p class="section-kicker">Storage</p>
-              <h2>文件与数据路径</h2>
-              <div class="field-grid">
-                <label><span>简历主档案</span><input name="resume_path" /></label>
-                <label><span>Boss 登录态</span><input name="boss_state_path" /></label>
-                <label><span>知识库目录</span><input name="knowledge_dir" /></label>
-                <label><span>简历版本目录</span><input name="resume_versions_dir" /></label>
-                <label><span>SQLite 数据库</span><input name="db_path" /></label>
-                <label><span>Chroma 向量库</span><input name="chroma_dir" /></label>
-              </div>
-            </section>
-
-            <section class="panel form-panel">
-              <p class="section-kicker">Retrieval</p>
-              <h2>RAG 与匹配</h2>
-              <div class="field-grid four">
-                <label><span>Chunk Size</span><input name="rag_chunk_size" type="number" min="64" max="8192" /></label>
-                <label><span>Chunk Overlap</span><input name="rag_chunk_overlap" type="number" min="0" max="4096" /></label>
-                <label><span>Top K</span><input name="rag_top_k" type="number" min="1" max="50" /></label>
-                <label><span>匹配阈值</span><input name="match_threshold" type="number" min="0" max="100" /></label>
-              </div>
-            </section>
-
-            <section class="panel form-panel">
-              <p class="section-kicker">Knowledge</p>
-              <h2>知识库索引</h2>
-              <p class="muted">将 <code>data/knowledge/</code> 下的 Markdown/文本入库到 Chroma。修改知识库后需重建索引。</p>
-              <div class="field-grid">
-                <article class="setting-item"><span>已索引来源</span><strong id="settingKnowledgeSources">-</strong></article>
-                <article class="setting-item"><span>最近入库</span><strong id="settingKnowledgeIngest">-</strong></article>
-              </div>
-              <label class="button-field"><span>操作</span><button id="ingestKnowledgeBtn" type="button">重建知识库索引</button></label>
-            </section>
-
-            <section class="panel form-panel">
-              <p class="section-kicker">Security</p>
-              <h2>安全</h2>
-              <label><span>WebUI API Token（公网暴露时必填）</span><input name="webui_api_token" type="password" autocomplete="off" placeholder="Bearer token" /></label>
-            </section>
-
-            <section class="settings-grid">
-              <article class="setting-item"><span>数据库状态</span><strong id="settingDb">-</strong></article>
-              <article class="setting-item"><span>Boss 登录态</span><strong id="settingBoss">-</strong></article>
-              <article class="setting-item"><span>模型提供商</span><strong id="settingOpenai">-</strong></article>
-              <article class="setting-item"><span>飞书</span><strong id="settingFeishu">-</strong></article>
-              <article class="setting-item"><span>简历主档案</span><strong id="settingResume">-</strong></article>
-            </section>
-          </form>
         </section>
       </main>
     </div>

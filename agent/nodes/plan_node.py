@@ -3,22 +3,28 @@ plan_node.py — Intent parser that extracts keywords from user query.
 Phase 1: simple keyword extraction. Will use LLM in Phase 4.
 """
 
-import re
 from config.settings import settings
 from models.agent_state import AgentState
-from scraper.boss_scraper import CITY_CODES
+import re
+
+
+CITY_NAMES = {
+    "全国", "北京", "上海", "广州", "深圳", "杭州", "南京", "苏州", "成都", "武汉",
+    "西安", "长沙", "重庆", "天津", "合肥", "郑州", "青岛", "厦门", "珠海",
+    "东莞", "佛山", "无锡", "宁波", "大连", "沈阳", "济南", "福州",
+}
 
 
 FILLER_WORDS = {
     "帮我", "帮忙", "请", "我想", "想要", "想找", "找", "搜索", "检索", "看看",
-    "岗位", "职位", "工作", "机会", "boss", "boss直聘", "直聘", "一下", "的",
+    "岗位", "职位", "工作", "机会", "一下", "的",
 }
 
 
 def parse_job_query(query: str) -> tuple[list[str], str, int | None]:
     """Extract search keywords, city, and optional threshold from a natural query."""
     city = "全国"
-    for name in sorted(CITY_CODES, key=len, reverse=True):
+    for name in sorted(CITY_NAMES, key=len, reverse=True):
         if name != "全国" and name in query:
             city = name
             query = query.replace(name, " ")

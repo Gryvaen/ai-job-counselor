@@ -1,5 +1,5 @@
 """
-Job — scraped job listing from BOSS Zhipin.
+Job — normalized job listing used by the matching pipeline.
 """
 
 import hashlib
@@ -7,7 +7,6 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-# 职位(Job)数据模型，表示从BOSS直聘抓取到的职位信息
 class Job(BaseModel):
     # 职位唯一ID，可由公司名和职位名生成MD5哈希
     id: str = ""
@@ -23,7 +22,7 @@ class Job(BaseModel):
     description: str
     # 职位详情页面URL
     url: str
-    # 抓取时间，默认为创建实例时的当前时间
+    # 入库时间，沿用 scraped_at 字段名以兼容已有数据库
     scraped_at: datetime = Field(default_factory=datetime.now)
 
     # 在模型校验后自动生成ID（如果未指定），确保每条数据有唯一标识

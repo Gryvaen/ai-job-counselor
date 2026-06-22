@@ -27,12 +27,8 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:7b"
     ollama_embedding_model: str = "nomic-embed-text"
 
-    # Feishu
-    feishu_webhook: str = ""
-
     # File paths
     resume_path: Path = PROJECT_ROOT / "data" / "resume.json"
-    boss_state_path: Path = PROJECT_ROOT / "data" / "boss_state.json"
     knowledge_dir: Path = PROJECT_ROOT / "data" / "knowledge"
     resume_versions_dir: Path = PROJECT_ROOT / "data" / "resume_versions"
     db_path: Path = PROJECT_ROOT / "data" / "jobmatch.db"
@@ -46,19 +42,14 @@ class Settings(BaseSettings):
     # Matching
     match_threshold: int = 75       #匹配分数阈值
 
-    # Boss login UX
-    boss_auto_open_browser: bool = True
-
     # Web console security (optional; required when binding 0.0.0.0)
     webui_api_token: str = ""
 
     # Ops
     log_level: str = "INFO"
     sentry_dsn: str = ""
-    task_screenshots_dir: Path = PROJECT_ROOT / "data" / "task_screenshots"
-    scrape_cooldown_hours: int = 24
 
-    model_config = {"env_file": ".env", "env_prefix": ""}
+    model_config = {"env_file": ".env", "env_prefix": "", "extra": "ignore"}
 
 
 settings = Settings()

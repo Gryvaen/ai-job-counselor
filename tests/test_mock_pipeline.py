@@ -16,7 +16,7 @@ def test_match_node_scores_mock_jobs(tmp_db_path):
             salary="15-25K",
             city="上海",
             description="熟悉 Linux 内核驱动开发，掌握 I2C/SPI/GPIO 等总线协议",
-            url="https://www.zhipin.com/job/abc123",
+            url="https://jobs.example.com/abc123",
         ),
         Job(
             title="Python 后端开发",
@@ -24,7 +24,7 @@ def test_match_node_scores_mock_jobs(tmp_db_path):
             salary="30-50K",
             city="北京",
             description="要求精通微服务架构，熟悉 Kubernetes、Docker、gRPC",
-            url="https://www.zhipin.com/job/ghi789",
+            url="https://jobs.example.com/ghi789",
         ),
     ]
     for job in mock_jobs:
@@ -41,7 +41,6 @@ def test_match_node_scores_mock_jobs(tmp_db_path):
         "match_results": [],
         "optimized_resumes": [],
         "learning_plans": [],
-        "notified": [],
         "messages": [],
     }
     result = match_node(state)

@@ -1,50 +1,30 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jobmatch-ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
   webui:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: jobmatch-webui
-    shm_size: "1gb"
     ports:
       - "${WEBUI_PORT:-8000}:8000"
-    env_file:
-      - .env
     environment:
       MODEL_PROVIDER: ${MODEL_PROVIDER:-ollama}
-      # 容器内不能用 127.0.0.1；固定走 Docker 网络中的 ollama 服务名
       OLLAMA_BASE_URL: http://ollama:11434/v1
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
-      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-ollama}
-      RESUME_PATH: ${RESUME_PATH:-data/resume.json}
-      BOSS_STATE_PATH: ${BOSS_STATE_PATH:-data/boss_state.json}
-      KNOWLEDGE_DIR: ${KNOWLEDGE_DIR:-data/knowledge}
-      RESUME_VERSIONS_DIR: ${RESUME_VERSIONS_DIR:-data/resume_versions}
-      DB_PATH: ${DB_PATH:-data/jobmatch.db}
-      CHROMA_DIR: ${CHROMA_DIR:-storage/vector_store}
-      BOSS_AUTO_OPEN_BROWSER: ${BOSS_AUTO_OPEN_BROWSER:-true}
-      BOSS_VISIBLE_BROWSER_IN_DOCKER: ${BOSS_VISIBLE_BROWSER_IN_DOCKER:-true}
-      DISPLAY: ${DISPLAY:-:0}
-      XAUTHORITY: /tmp/.Xauthority
-      QT_X11_NO_MITSHM: "1"
     volumes:
       - ./data:/app/data
       - ./storage:/app/storage
       - ./.env:/app/.env
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-${HOME}/.Xauthority}:/tmp/.Xauthority:ro
-    networks:
-      - default
-      - ollama_net
+    depends_on:
+      - ollama
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
 
-networks:
-  ollama_net:
-    external: true
-    name: ${OLLAMA_DOCKER_NETWORK:-open-webui_default}
+volumes:
+  ollama_data:

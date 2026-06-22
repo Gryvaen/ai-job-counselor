@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""JobMatch Agent CLI — Boss Zhipin job scraping + RAG matching + resume optimization + Feishu notification."""
+"""JobMatch Agent CLI — local job library + RAG matching + resume optimization."""
 
 import argparse
 import json
 import sys
 from config.settings import settings
-from agent.nodes.plan_node import parse_job_query
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -16,7 +15,6 @@ def _run(args: argparse.Namespace) -> int:
 
     print(f"[JOBMATCH] Pipeline: keywords={keywords}, city={city}, threshold={threshold}")
     print(f"[JOBMATCH] DB: {settings.db_path}")
-    print(f"[JOBMATCH] Boss state: {settings.boss_state_path}")
 
     try:
         from agent.graph import build_graph
@@ -33,16 +31,15 @@ def _run(args: argparse.Namespace) -> int:
             "threshold": threshold,
             "jobs": [], "retrieved_context": [],
             "match_results": [], "optimized_resumes": [],
-            "learning_plans": [], "notified": [], "messages": [],
+            "learning_plans": [], "messages": [],
         }
 
         print("[JOBMATCH] Executing pipeline...")
         result = graph.invoke(state)
 
         print("\n=== Pipeline Results ===")
-        print(f"Jobs scraped:  {len(result.get('jobs', []))}")
+        print(f"Jobs analyzed: {len(result.get('jobs', []))}")
         print(f"Matches scored: {len(result.get('match_results', []))}")
-        print(f"Jobs notified:  {len(result.get('notified', []))}")
 
         job_map = {j.id: j for j in result.get("jobs", [])}
         for m in result.get("match_results", []):
@@ -78,7 +75,7 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _chat(_: argparse.Namespace) -> int:
-    print("[chat] JobMatch interactive mode. Try: /search <城市> <关键词...> [80分以上]")
+    print("[chat] JobMatch interactive mode. Try: /status, explain <job_id>, or run <keywords>")
     while True:
         try:
             line = input("jobmatch> ").strip()
@@ -92,10 +89,8 @@ def _chat(_: argparse.Namespace) -> int:
             return 0
         if line == "help":
             print("Commands:")
-            print("  /search <城市> <关键词...> [80分以上]")
             print("  /status")
             print("  /help")
-            print("  帮我找上海的 Linux驱动,BSP 岗位")
             print("  run Linux驱动,BSP [--city 上海] [--threshold 75]")
             print("  explain <job_id>")
             print("  quit")
@@ -103,24 +98,8 @@ def _chat(_: argparse.Namespace) -> int:
         if line.startswith("/"):
             if line in {"/help", "/"}:
                 print("Slash commands:")
-                print("  /search <城市> <关键词...> [80分以上]  运行岗位搜索")
                 print("  /status                         查看本地记录数量")
                 print("  /help                           查看帮助")
-                continue
-            if line.startswith("/search"):
-                query = line.removeprefix("/search").strip()
-                keywords, city, parsed_threshold = parse_job_query(query)
-                threshold = parsed_threshold or settings.match_threshold
-                if not keywords:
-                    print("[chat] 用法: /search <城市> <关键词...> [80分以上]")
-                    print("[chat] 示例: /search 上海 Linux驱动 BSP 80分以上")
-                    continue
-                _run(argparse.Namespace(
-                    keywords=",".join(keywords),
-                    city=city,
-                    threshold=threshold,
-                    query=query,
-                ))
                 continue
             if line == "/status":
                 _print_status()
@@ -146,18 +125,7 @@ def _chat(_: argparse.Namespace) -> int:
             _explain(argparse.Namespace(job_id=line.split(maxsplit=1)[1]))
             continue
 
-        keywords, city, parsed_threshold = parse_job_query(line)
-        if keywords:
-            threshold = parsed_threshold or settings.match_threshold
-            _run(argparse.Namespace(
-                keywords=",".join(keywords),
-                city=city,
-                threshold=threshold,
-                query=line,
-            ))
-            continue
-
-        print("[chat] I did not catch the target role. Type help for examples.")
+        print("[chat] Unknown command. Type help for examples.")
     return 0
 
 
@@ -260,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_parser = subparsers.add_parser("run", help="Run full pipeline")
     run_parser.add_argument("--keywords", type=str, required=True, help="Comma-separated search keywords")
-    run_parser.add_argument("--city", type=str, default="全国", help="Boss city name (default: 全国)")
+    run_parser.add_argument("--city", type=str, default="全国", help="Job city name (default: 全国)")
     run_parser.add_argument("--threshold", type=int, default=settings.match_threshold, help=f"Match threshold (default: {settings.match_threshold})")
     run_parser.set_defaults(func=_run)
 
