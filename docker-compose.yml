@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: jobmatch-webui
+    shm_size: "1gb"
     ports:
       - "${WEBUI_PORT:-8000}:8000"
     env_file:
@@ -22,15 +23,16 @@ services:
       DB_PATH: ${DB_PATH:-data/jobmatch.db}
       CHROMA_DIR: ${CHROMA_DIR:-storage/vector_store}
       BOSS_AUTO_OPEN_BROWSER: ${BOSS_AUTO_OPEN_BROWSER:-true}
-      # Boss 可视化登录需要宿主机 X11。Linux 下先执行: xhost +local:docker
+      BOSS_VISIBLE_BROWSER_IN_DOCKER: ${BOSS_VISIBLE_BROWSER_IN_DOCKER:-true}
       DISPLAY: ${DISPLAY:-:0}
-      XAUTHORITY: /tmp/.docker.xauth
+      XAUTHORITY: /tmp/.Xauthority
+      QT_X11_NO_MITSHM: "1"
     volumes:
       - ./data:/app/data
       - ./storage:/app/storage
       - ./.env:/app/.env
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-/tmp/.docker.xauth}:/tmp/.docker.xauth:ro
+      - ${XAUTHORITY:-${HOME}/.Xauthority}:/tmp/.Xauthority:ro
     networks:
       - default
       - ollama_net

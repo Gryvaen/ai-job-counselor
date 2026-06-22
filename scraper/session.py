@@ -15,6 +15,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -46,6 +47,8 @@ class BossSession:
         self.fresh_login = fresh_login
         self.profile_dir = chrome_profile_dir(state_file)
         self._playwright = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
         self._chrome_process: subprocess.Popen | None = None
         self._chrome_debug_port: int | None = None
         self._headless = True
@@ -57,20 +60,20 @@ class BossSession:
             raise RuntimeError("Chrome CDP port is not ready")
         return f"http://127.0.0.1:{self._chrome_debug_port}"
 
-    async def start(self, headless: bool = True) -> None:
+    async def start(self, headless: bool = True, initial_url: str | None = None) -> None:
         self._headless = headless or not os.environ.get("DISPLAY")
         if self.fresh_login:
-            _wipe_profile_cookies(self.profile_dir)
+            _wipe_profile(self.profile_dir)
 
         self._playwright = await async_playwright().start()
         if not Path(CHROME_EXECUTABLE).exists():
-            await self._start_playwright_fallback(headless=headless)
+            await self._start_playwright_fallback(headless=headless, initial_url=initial_url)
             if self.restore_state:
                 await self._restore_cookies()
             return
 
         await self._ensure_profile_available()
-        await self._launch_chrome()
+        await self._launch_chrome(initial_url=initial_url)
         if self.restore_state:
             cookies = await self._read_cookies()
             if cookies:
@@ -91,6 +94,14 @@ class BossSession:
             except Exception as exc:
                 print(f"[scraper] Failed to terminate Chrome process: {exc}")
             self._chrome_process = None
+
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception as exc:
+                print(f"[scraper] Failed to close Playwright browser: {exc}")
+            self._browser = None
+            self._context = None
 
         if self._playwright:
             try:
@@ -154,10 +165,8 @@ class BossSession:
         print("[scraper] Opening Boss Zhipin login page. Please scan the QR code in the browser.")
         print("[scraper] Waiting... The pipeline will continue once login cookies are detected.")
 
-        before_names = {c["name"] for c in await self._read_cookies()}
-        await self._clear_cookies()
-
-        await self._open_url(BOSS_LOGIN_URL)
+        if not await self._has_open_devtools_page(BOSS_LOGIN_URL):
+            await self._open_url(BOSS_LOGIN_URL)
         await asyncio.sleep(2.0)
         self._login_page_url = BOSS_LOGIN_URL
 
@@ -170,20 +179,24 @@ class BossSession:
                 raise RuntimeError("Boss Chrome 已关闭，请重新发起 /search 并在弹出的浏览器中完成登录。")
 
             cookies = await self._read_cookies()
-            fresh = [
-                c for c in cookies
-                if c["name"] in LOGIN_COOKIE_NAMES and c["name"] not in before_names
-            ]
-            if fresh and ticks >= 1:
+            if self._has_login_cookie(cookies) and ticks >= 1:
                 break
 
             if screenshot_callback and ticks % 2 == 0:
                 await self._capture_login_screenshot(screenshot_callback)
             ticks += 1
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
 
         await self._save_cookies(cookies)
         print("[scraper] Login cookies saved.")
+
+    async def save_current_login(self) -> bool:
+        cookies = await self._read_cookies()
+        if not self._has_login_cookie(cookies):
+            return False
+        await self._save_cookies(cookies)
+        print("[scraper] Login cookies saved.")
+        return True
 
     def has_saved_login(self) -> bool:
         if not self.state_file.exists():
@@ -195,11 +208,15 @@ class BossSession:
         except Exception:
             return False
 
+    @staticmethod
+    def _has_login_cookie(cookies: list[dict]) -> bool:
+        return any(c.get("name") in LOGIN_COOKIE_NAMES for c in cookies)
+
     # ------------------------------------------------------------------
     # Chrome lifecycle
     # ------------------------------------------------------------------
 
-    async def _launch_chrome(self) -> None:
+    async def _launch_chrome(self, initial_url: str | None = None) -> None:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         last_error = None
         for attempt in range(2):
@@ -214,26 +231,40 @@ class BossSession:
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-accelerated-2d-canvas",
+                "--disable-accelerated-video-decode",
+                "--disable-features=UseSkiaRenderer,VizDisplayCompositor",
+                "--disable-session-crashed-bubble",
+                "--noerrdialogs",
+                "--new-window",
+                "--start-maximized",
+                "--window-position=80,80",
+                "--window-size=1280,900",
+                "--ozone-platform=x11",
             ]
+            if _needs_chrome_no_sandbox():
+                cmd.append("--no-sandbox")
             if self._headless:
                 cmd.extend(["--headless=new", "--disable-gpu"])
-            cmd.append("about:blank")
-            self._chrome_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            try:
-                await self._wait_cdp_ready(self._cdp_endpoint)
-                return
-            except Exception as exc:
-                last_error = exc
-                if self._chrome_process:
-                    self._chrome_process.terminate()
-                    self._chrome_process = None
+            cmd.append(initial_url or "about:blank")
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace") as stderr:
+                self._chrome_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr,
+                )
+                try:
+                    await self._wait_cdp_ready(self._cdp_endpoint)
+                    return
+                except Exception as exc:
+                    last_error = _chrome_start_error(exc, self._chrome_process, stderr)
+                    if self._chrome_process:
+                        self._chrome_process.terminate()
+                        self._chrome_process = None
         raise RuntimeError(f"Failed to start Chrome for Boss scraping: {last_error}")
 
-    async def _start_playwright_fallback(self, headless: bool) -> None:
+    async def _start_playwright_fallback(self, headless: bool, initial_url: str | None = None) -> None:
         browser = await self._playwright.chromium.launch(
             headless=headless,
             args=["--disable-blink-features=AutomationControlled", "--no-first-run"],
@@ -245,31 +276,70 @@ class BossSession:
             timezone_id="Asia/Shanghai",
         )
         self._browser = browser
+        if initial_url:
+            page = await self._context.new_page()
+            await page.goto(initial_url, wait_until="domcontentloaded", timeout=30000)
 
     async def _open_url(self, url: str) -> None:
-        if self._headless:
-            async with httpx.AsyncClient() as client:
-                response = await client.put(
-                    f"{self._cdp_endpoint}/json/new?{quote(url, safe='')}",
-                    timeout=15,
-                )
-                response.raise_for_status()
+        if self._context and not self._chrome_debug_port:
+            page = await self._context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             return
 
-        subprocess.Popen(
-            [
-                CHROME_EXECUTABLE,
-                f"--user-data-dir={self.profile_dir}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                url,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if not self._headless and Path(CHROME_EXECUTABLE).exists():
+            subprocess.Popen(
+                [
+                    CHROME_EXECUTABLE,
+                    f"--user-data-dir={self.profile_dir}",
+                    "--new-window",
+                    "--start-maximized",
+                    "--window-position=80,80",
+                    "--window-size=1280,900",
+                    "--ozone-platform=x11",
+                    "--disable-gpu",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-features=UseSkiaRenderer,VizDisplayCompositor",
+                    url,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            await asyncio.sleep(0.75)
+            if await self._has_open_devtools_page(url):
+                return
+
+        async with httpx.AsyncClient() as client:
+            response = await client.put(
+                f"{self._cdp_endpoint}/json/new?{quote(url, safe='')}",
+                timeout=15,
+            )
+            response.raise_for_status()
+
+    async def _has_open_devtools_page(self, url: str) -> bool:
+        if self._context and not self._chrome_debug_port:
+            return self._match_page(self._context, host=urlparse(url).netloc, path_hint=urlparse(url).path.rstrip("/")) is not None
+
+        expected = urlparse(url)
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(f"{self._cdp_endpoint}/json/list", timeout=2)
+                response.raise_for_status()
+                pages = response.json()
+            except Exception:
+                return False
+        for page in pages:
+            page_url = page.get("url") or ""
+            parsed = urlparse(page_url)
+            if parsed.netloc == expected.netloc and parsed.path.rstrip("/") == expected.path.rstrip("/"):
+                return True
+        return False
 
     @asynccontextmanager
     async def _cdp_context(self):
+        if self._context and not self._chrome_debug_port:
+            yield self._context
+            return
+
         browser = await self._playwright.chromium.connect_over_cdp(self._cdp_endpoint)
         try:
             if not browser.contexts:
@@ -380,7 +450,7 @@ class BossSession:
             json.dump(cookies, f, indent=2)
 
     async def _ensure_profile_available(self) -> None:
-        if not _profile_in_use(self.profile_dir) and not (self.profile_dir / "SingletonLock").exists():
+        if not _profile_in_use(self.profile_dir) and not _profile_lock_exists(self.profile_dir):
             return
         print("[scraper] Clearing stale Boss Chrome profile lock...")
         subprocess.run(
@@ -422,14 +492,39 @@ class BossSession:
 
 def _profile_in_use(profile_dir: Path) -> bool:
     lock = profile_dir / "SingletonLock"
-    if not lock.exists():
+    if not _profile_lock_exists(profile_dir):
         return False
     try:
         target = os.readlink(lock)
-        lock_pid = Path(target).name
+        lock_pid = Path(target).name.rsplit("-", 1)[-1]
         return lock_pid.isdigit() and Path(f"/proc/{lock_pid}").exists()
     except Exception:
         return True
+
+
+def _profile_lock_exists(profile_dir: Path) -> bool:
+    return os.path.lexists(profile_dir / "SingletonLock")
+
+
+def _needs_chrome_no_sandbox() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _chrome_start_error(exc: Exception, process: subprocess.Popen | None, stderr) -> str:
+    detail = str(exc)
+    if not process or process.poll() is None:
+        return detail
+
+    try:
+        stderr.seek(0)
+        chrome_error = stderr.read().strip()
+    except Exception:
+        chrome_error = ""
+
+    if chrome_error:
+        chrome_error = " ".join(chrome_error.splitlines()[-8:])
+        return f"{detail}; Chrome stderr: {chrome_error}"
+    return f"{detail}; Chrome exit code: {process.returncode}"
 
 
 def _free_port() -> int:
@@ -438,17 +533,20 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wipe_profile_cookies(profile_dir: Path) -> None:
-    default = profile_dir / "Default"
-    if not default.exists():
+def _wipe_profile(profile_dir: Path) -> None:
+    if not profile_dir.exists():
         return
-    print("[scraper] Clearing persisted Boss Chrome cookies for a fresh login...")
-    for name in ("Cookies", "Cookies-journal", "Network Persistent State"):
-        target = default / name
+    print("[scraper] Clearing Boss Chrome profile for a fresh login...")
+    old_profile = profile_dir.with_name(f"{profile_dir.name}.old-{os.getpid()}")
+    for index in range(10):
+        candidate = old_profile if index == 0 else old_profile.with_name(f"{old_profile.name}-{index}")
+        if candidate.exists():
+            continue
         try:
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
-            else:
-                target.unlink(missing_ok=True)
+            profile_dir.rename(candidate)
+            shutil.rmtree(candidate, ignore_errors=True)
+            return
         except Exception as exc:
-            print(f"[scraper] Could not remove {target.name}: {exc}")
+            print(f"[scraper] Could not move old Chrome profile aside: {exc}")
+            break
+    shutil.rmtree(profile_dir, ignore_errors=True)

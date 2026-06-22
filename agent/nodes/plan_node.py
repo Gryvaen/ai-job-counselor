@@ -25,10 +25,13 @@ def parse_job_query(query: str) -> tuple[list[str], str, int | None]:
             break
 
     threshold = None
-    threshold_match = re.search(r'(\d+)\s*分以上?', query)
+    threshold_match = re.search(r'(\d+)\s*(?:分以上?|以上|分)?\s*$', query)
     if threshold_match:
         threshold = int(threshold_match.group(1))
-        query = query.replace(threshold_match.group(0), " ")
+        if 0 <= threshold <= 100:
+            query = query[:threshold_match.start()] + " "
+        else:
+            threshold = None
 
     cleaned = query.lower()
     for word in FILLER_WORDS:

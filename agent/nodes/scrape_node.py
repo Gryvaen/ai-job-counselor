@@ -7,6 +7,7 @@ import logging
 import os
 
 from scraper import BossSession, BossScraper, LoginRequiredError, deduplicate_jobs
+from scraper.boss_scraper import BlockedPageError, SecurityCheckPending
 from config.settings import settings
 from models.agent_state import AgentState
 
@@ -19,10 +20,16 @@ def scrape_node(state: AgentState) -> dict:
     login_screenshot_callback = state.get("login_screenshot_callback")
     login_started_callback = state.get("login_started_callback")
     existing_jobs = state.get("jobs", [])
-    can_open_browser = settings.boss_auto_open_browser and bool(os.environ.get("DISPLAY"))
+    can_open_browser = (
+        settings.boss_auto_open_browser
+        and bool(os.environ.get("DISPLAY"))
+        and (not _running_in_container() or _truthy_env("BOSS_VISIBLE_BROWSER_IN_DOCKER"))
+    )
     scrape_error = ""
 
     async def _scrape_all(headless: bool = True, login_first: bool = False):
+        if login_first:
+            raise LoginRequiredError("Boss login is required before searching jobs.")
         session = BossSession(
             settings.boss_state_path,
             restore_state=not login_first,
@@ -30,11 +37,6 @@ def scrape_node(state: AgentState) -> dict:
         )
         await session.start(headless=headless)
         try:
-            if login_first:
-                await session.wait_for_login(
-                    screenshot_callback=login_screenshot_callback,
-                    login_started_callback=login_started_callback,
-                )
             scraper = BossScraper(session, fetch_detail=True)
             all_jobs = []
             for kw in keywords:
@@ -63,25 +65,30 @@ def scrape_node(state: AgentState) -> dict:
     fresh_jobs = []
     try:
         saved_login = BossSession(settings.boss_state_path).has_saved_login()
+        if not saved_login:
+            if login_started_callback:
+                login_started_callback()
+            return {"jobs": existing_jobs, "scrape_error": "login_required"}
         headless = not can_open_browser
-        if not saved_login and can_open_browser:
-            logger.info("[agent/scrape] No valid Boss login cookie. Opening visible browser for login...")
-        elif saved_login and can_open_browser:
+        if saved_login and can_open_browser:
             logger.info("[agent/scrape] Using visible Chrome for Boss search...")
-        elif not saved_login:
-            logger.info("[agent/scrape] No valid Boss login cookie. Falling back to WebUI screenshot login...")
-        fresh_jobs = asyncio.run(_scrape_all(headless=headless, login_first=not saved_login))
+        fresh_jobs = asyncio.run(_scrape_all(headless=headless, login_first=False))
     except LoginRequiredError:
-        logger.warning("[agent/scrape] Boss login required. Opening browser for QR-code login...")
-        try:
-            fresh_jobs = asyncio.run(_scrape_all(headless=not can_open_browser, login_first=True))
-        except Exception as e:
-            scrape_error = f"scraping_failed_after_login: {e}"
-            logger.error("[agent/scrape] Scraping failed after login attempt: %s", e)
-            if existing_jobs:
-                logger.info("[agent/scrape] Using %d pre-existing jobs", len(existing_jobs))
-                return {"jobs": existing_jobs, "scrape_error": scrape_error}
-            return {"jobs": [], "scrape_error": scrape_error}
+        logger.warning("[agent/scrape] Boss login required; waiting for user-triggered manual login.")
+        if login_started_callback:
+            login_started_callback()
+        return {"jobs": existing_jobs, "scrape_error": "login_required"}
+    except SecurityCheckPending as e:
+        scrape_error = f"boss_security_check: {e}"
+        logger.error("[agent/scrape] Boss security check required: %s", e)
+        return {"jobs": existing_jobs, "scrape_error": scrape_error}
+    except BlockedPageError as e:
+        scrape_error = (
+            "boss_access_restricted: Boss 返回访问受限/IP 异常页面。"
+            "请在弹出的 Boss 浏览器中手动查看页面提示，等待限制恢复或更换正常网络后再搜索。"
+        )
+        logger.error("[agent/scrape] Boss access restricted: %s", e)
+        return {"jobs": existing_jobs, "scrape_error": scrape_error}
     except Exception as e:
         scrape_error = f"scraping_failed: {e}"
         logger.error("[agent/scrape] Scraping failed: %s", e)
@@ -110,3 +117,11 @@ def scrape_node(state: AgentState) -> dict:
         scrape_error = "no_jobs_found"
 
     return {"jobs": new_jobs, "scrape_error": scrape_error}
+
+
+def _running_in_container() -> bool:
+    return os.path.exists("/.dockerenv") or _truthy_env("RUNNING_IN_CONTAINER")
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}

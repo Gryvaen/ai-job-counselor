@@ -252,10 +252,22 @@ code {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   padding: 12px;
   background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  text-align: left;
+}
+
+button.system-card {
+  cursor: pointer;
+}
+
+button.system-card:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .dot {
@@ -939,6 +951,16 @@ h3 {
   border: 1px solid rgba(79, 140, 255, 0.2);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.task-actions button {
+  min-height: 36px;
 }
 
 .login-qr {

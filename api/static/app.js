@@ -157,10 +157,10 @@ function renderBossLoginStatus(options = {}) {
   if (state.activeTaskId && state.bossLoginPending) {
     dot.className = "dot pending";
     text.textContent = "等待 Boss 登录";
-    meta.textContent = "请在 Chrome 或下方二维码扫码";
+    meta.textContent = "点击打开登录页";
     if (banner) {
       banner.className = "boss-search-banner pending";
-      banner.textContent = "正在等待 Boss 扫码登录。请在弹出的 Chrome 窗口完成登录；若出现安全验证，手动点一下后任务会自动重试。";
+      banner.textContent = "当前搜索正在等待 Boss 登录。请在任务卡片中打开登录页，登录成功后点击“已完成登录”。";
       banner.classList.remove("hidden");
     }
     return;
@@ -180,22 +180,45 @@ function renderBossLoginStatus(options = {}) {
 
   dot.className = "dot warn";
   text.textContent = "Boss 未登录";
-  meta.textContent = "搜索时将打开 Chrome 扫码";
+  meta.textContent = "点击登录";
   if (banner) {
     banner.className = "boss-search-banner";
-    banner.textContent = "尚未检测到 Boss 登录。发起搜索后会弹出 Chrome 登录页，也可用终端运行 python scripts/login_boss.py 预先登录。";
+    banner.textContent = "尚未检测到 Boss 登录。发起搜索后会先暂停等待，请点击任务中的“打开 Boss 登录页”并手动登录。";
     banner.classList.remove("hidden");
   }
 }
 
-function confirmBossSearch() {
-  if (isBossLoggedIn()) return true;
-  return window.confirm(
-    "尚未检测到 Boss 登录态。\n\n" +
-    "继续后将打开 Chrome 登录页，请用 Boss 直聘 App 扫码。\n" +
-    "若出现安全验证，在浏览器里手动完成即可，任务会自动重试。\n\n" +
-    "本工具只做搜索与匹配展示，不会自动投递或批量私信。是否继续？"
-  );
+async function openBossLogin(button) {
+  if (state.bossLoginPending) {
+    await saveBossLogin(button);
+    return;
+  }
+  setBusy(button, true, "打开中...");
+  try {
+    const result = await api("/api/boss/login/start", { method: "POST" });
+    showNotice(result.message || "请在浏览器中完成 Boss 登录");
+    state.bossLoginPending = true;
+    renderBossLoginStatus();
+  } catch (error) {
+    showNotice(error.message, "error");
+    window.alert(error.message);
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function saveBossLogin(button) {
+  setBusy(button, true, "保存中...");
+  try {
+    const result = await api("/api/boss/login/save", { method: "POST" });
+    showNotice(result.message || "Boss 登录态已保存");
+    state.bossLoginPending = false;
+    await checkHealth();
+  } catch (error) {
+    showNotice(error.message, "error");
+  } finally {
+    setBusy(button, false);
+  }
 }
 
 async function loadKnowledgeStatus() {
@@ -491,7 +514,6 @@ async function generateTemplate(event) {
 
 async function runSearch(event) {
   event.preventDefault();
-  if (!confirmBossSearch()) return;
 
   const form = event.currentTarget;
   const button = $("#searchBtn");
@@ -530,9 +552,11 @@ function startTaskPolling(taskId) {
 async function pollTask(taskId) {
   try {
     const task = await api(`/api/tasks/${encodeURIComponent(taskId)}`);
-    if (task.stage === "login") {
+    if (task.status === "completed") {
+      state.bossLoginPending = false;
+    } else if (task.stage === "login") {
       state.bossLoginPending = true;
-    } else if (task.status === "completed") {
+    } else {
       state.bossLoginPending = false;
     }
     renderBossLoginStatus();
@@ -612,10 +636,13 @@ function taskHtml(task) {
       ? `data:image/png;base64,${task.login_screenshot}`
       : "";
   const securityHint = (task.message || "").includes("安全") || (task.message || "").includes("security")
-    ? `<div class="task-hint">出现 Boss 安全验证时，请在 Chrome 窗口手动完成，完成后任务会自动重试。</div>`
+    ? `<div class="task-hint">出现 Boss 安全验证时，请打开登录截图查看并按页面提示处理，完成后任务会自动重试。</div>`
     : task.stage === "login"
-      ? `<div class="task-hint">请在弹出的 Chrome 窗口或下方二维码扫码登录。登录成功后无需再次提交搜索。</div>`
+      ? `<div class="task-hint">请点击“打开 Boss 登录页”，在浏览器里手动完成登录。登录成功后回到这里点击“已完成登录”。</div>`
       : "";
+  const loginAction = task.stage === "login"
+    ? `<div class="task-actions"><button class="secondary-btn" type="button" data-boss-login>打开 Boss 登录页</button><button class="primary-btn" type="button" data-boss-login-save>已完成登录</button></div>`
+    : "";
   return `
     <div class="task-card" data-status="${escapeAttr(task.status)}">
       <div class="task-head">
@@ -644,6 +671,7 @@ function taskHtml(task) {
         </div>
       ` : ""}
       ${securityHint}
+      ${loginAction}
       <div class="task-events">
         ${events.map((event) => `
           <div class="task-event ${event.stage === task.stage ? "active" : ""}">
@@ -850,12 +878,6 @@ async function sendChat(event) {
 
   appendMessage("user", text);
   input.value = "";
-  const slashCommand = text.trimStart().split(/\s+/, 1)[0].toLowerCase();
-  if ((slashCommand === "/search" || slashCommand.startsWith("/search")) && !confirmBossSearch()) {
-    appendMessage("agent", "已取消搜索。可先运行 python scripts/login_boss.py 完成 Boss 登录，或确认后在 Chrome 中扫码。");
-    hideCommandMenu();
-    return;
-  }
   try {
     const result = await api("/api/chat", {
       method: "POST",
@@ -1080,6 +1102,15 @@ function bindEvents() {
   });
   $("#reloadJobsBtn")?.addEventListener("click", loadJobs);
   $("#reloadVersionsBtn")?.addEventListener("click", loadVersions);
+  document.addEventListener("click", (event) => {
+    const saveButton = event.target.closest("[data-boss-login-save]");
+    if (saveButton) {
+      saveBossLogin(saveButton);
+      return;
+    }
+    const button = event.target.closest("[data-boss-login]");
+    if (button) openBossLogin(button);
+  });
 
   $("#jobList")?.addEventListener("click", (event) => {
     const card = event.target.closest("[data-job-id]");

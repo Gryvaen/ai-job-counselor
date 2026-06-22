@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import asyncio
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +30,13 @@ from agent.nodes.plan_node import parse_job_query
 from models.agent_state import AgentState
 from models.job import Job
 from scraper import BossSession
+from scraper.session import BOSS_LOGIN_URL
 from storage.db import (
     JobRecord,
     LearningPlanRecord,
     MatchRecord,
     ResumeVersionRecord,
+    SearchTaskRecord,
     create_search_task as db_create_search_task,
     get_engine,
     get_search_task,
@@ -190,7 +195,13 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 TASK_LOCK = threading.Lock()
 SEARCH_RUN_LOCK = threading.Lock()
+BOSS_LOGIN_LOCK = threading.Lock()
+BOSS_LOGIN_LOOP: asyncio.AbstractEventLoop | None = None
+BOSS_LOGIN_SESSION: BossSession | None = None
+BOSS_LOGIN_STOP: threading.Event | None = None
+BOSS_LOGIN_THREAD: threading.Thread | None = None
 TASK_TTL_SECONDS = 60 * 60 * 6
+BOSS_LOGIN_WAIT_SECONDS = 60 * 10
 
 
 SLASH_COMMANDS = [
@@ -267,6 +278,7 @@ def startup() -> None:
     get_engine(settings.db_path)
     settings.resume_versions_dir.mkdir(parents=True, exist_ok=True)
     settings.task_screenshots_dir.mkdir(parents=True, exist_ok=True)
+    _fail_interrupted_search_tasks()
     prune_search_tasks(TASK_TTL_SECONDS)
     if settings.sentry_dsn:
         try:
@@ -288,6 +300,29 @@ def _check_db() -> tuple[bool, str]:
         return True, "ok"
     except Exception as exc:
         return False, str(exc)
+
+
+def _fail_interrupted_search_tasks() -> None:
+    try:
+        with get_session() as sess:
+            rows = (
+                sess.query(SearchTaskRecord)
+                .filter(SearchTaskRecord.status.in_(("queued", "running")))
+                .all()
+            )
+            now = datetime.now()
+            for row in rows:
+                row.status = "failed"
+                row.stage = "failed"
+                row.progress = max(int(row.progress or 0), 1)
+                row.message = "服务已重启，旧搜索任务已停止。请重新发起搜索。"
+                row.error = row.message
+                row.updated_at = now
+            sess.commit()
+            if rows:
+                logger.info("Marked %d interrupted search tasks as failed.", len(rows))
+    except Exception as exc:
+        logger.warning("Failed to mark interrupted search tasks: %s", exc)
 
 
 def _check_chroma() -> tuple[bool, str]:
@@ -347,6 +382,120 @@ async def health() -> dict:
 @app.get("/api/commands")
 def list_commands() -> dict:
     return {"commands": SLASH_COMMANDS}
+
+
+@app.post("/api/boss/login/start")
+def start_boss_login() -> dict:
+    global BOSS_LOGIN_THREAD
+    if not os.environ.get("DISPLAY"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "当前 WebUI 运行环境没有可视化浏览器 DISPLAY，无法从容器里弹出 Boss 登录页。"
+                "请在宿主机项目目录运行 .venv/bin/python scripts/login_boss.py 完成登录，"
+                "登录态会写入 data/boss_state.json，当前搜索会检测到后继续。"
+            ),
+        )
+
+    with BOSS_LOGIN_LOCK:
+        if BOSS_LOGIN_THREAD and BOSS_LOGIN_THREAD.is_alive():
+            return {
+                "status": "opening",
+                "message": "Boss 登录页已打开。登录完成后请点击“已完成登录”。",
+            }
+
+    ready = threading.Event()
+    stop = threading.Event()
+    error: dict[str, str] = {}
+
+    def _login_worker() -> None:
+        global BOSS_LOGIN_LOOP, BOSS_LOGIN_SESSION, BOSS_LOGIN_STOP, BOSS_LOGIN_THREAD
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        session: BossSession | None = None
+
+        async def _wait_until_done() -> None:
+            assert session is not None
+            while not stop.is_set():
+                if session._chrome_process and session._chrome_process.poll() is not None:
+                    break
+                await asyncio.sleep(1)
+
+        async def _run() -> None:
+            global BOSS_LOGIN_LOOP, BOSS_LOGIN_SESSION, BOSS_LOGIN_STOP
+            nonlocal session
+            session = BossSession(
+                settings.boss_state_path,
+                restore_state=False,
+                fresh_login=False,
+            )
+            await session.start(headless=False, initial_url=BOSS_LOGIN_URL)
+            with BOSS_LOGIN_LOCK:
+                BOSS_LOGIN_LOOP = loop
+                BOSS_LOGIN_SESSION = session
+                BOSS_LOGIN_STOP = stop
+            ready.set()
+            await _wait_until_done()
+
+        try:
+            loop.run_until_complete(_run())
+        except Exception as exc:
+            error["message"] = str(exc)
+            ready.set()
+            logger.exception("Boss login helper failed")
+        finally:
+            async def _run() -> None:
+                if session:
+                    await session.close()
+            try:
+                loop.run_until_complete(_run())
+            except Exception:
+                logger.exception("Boss login cleanup failed")
+            with BOSS_LOGIN_LOCK:
+                if BOSS_LOGIN_LOOP is loop:
+                    BOSS_LOGIN_LOOP = None
+                    BOSS_LOGIN_SESSION = None
+                    BOSS_LOGIN_STOP = None
+                    BOSS_LOGIN_THREAD = None
+            loop.close()
+
+    thread = threading.Thread(target=_login_worker, name="jobmatch-boss-login", daemon=True)
+    with BOSS_LOGIN_LOCK:
+        BOSS_LOGIN_THREAD = thread
+    thread.start()
+    if not ready.wait(timeout=15):
+        raise HTTPException(status_code=504, detail="打开 Boss 登录浏览器超时，请稍后重试。")
+    if error:
+        raise HTTPException(status_code=500, detail=error["message"])
+    return {
+        "status": "opening",
+        "message": "已打开 Boss 登录页。请手动完成登录，然后点击“已完成登录”。",
+    }
+
+
+@app.post("/api/boss/login/save")
+def save_boss_login() -> dict:
+    with BOSS_LOGIN_LOCK:
+        loop = BOSS_LOGIN_LOOP
+        session = BOSS_LOGIN_SESSION
+        stop = BOSS_LOGIN_STOP
+    if not loop or not session:
+        raise HTTPException(status_code=409, detail="Boss 登录浏览器未打开，请先点击“打开 Boss 登录页”。")
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(session.save_current_login(), loop)
+        saved = future.result(timeout=15)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"保存 Boss 登录态失败: {exc}") from exc
+
+    if not saved:
+        raise HTTPException(
+            status_code=409,
+            detail="没有读到 Boss 登录 cookie。请确认已在刚弹出的 Boss 浏览器窗口中完成登录。",
+        )
+    if stop:
+        stop.set()
+    return {"status": "saved", "message": "Boss 登录态已保存，搜索任务会自动继续。"}
 
 
 @app.get("/api/config", response_model=AppConfig)
@@ -658,6 +807,42 @@ def _run_job_search(
     )
 
 
+def _boss_state_stamp() -> tuple[int, int] | None:
+    try:
+        stat = settings.boss_state_path.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except FileNotFoundError:
+        return None
+
+
+def _wait_for_boss_login(
+    task_id: str,
+    *,
+    require_state_change: bool = False,
+    previous_stamp: tuple[int, int] | None = None,
+) -> None:
+    if not require_state_change and BossSession(settings.boss_state_path).has_saved_login():
+        return
+
+    _append_task_event(
+        task_id,
+        "login",
+        10,
+        "需要先登录 Boss。请点击任务中的“打开 Boss 登录页”，并在浏览器里手动完成登录。",
+    )
+    deadline = time.monotonic() + BOSS_LOGIN_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        state_changed = _boss_state_stamp() != previous_stamp
+        if BossSession(settings.boss_state_path).has_saved_login() and (
+            not require_state_change or state_changed
+        ):
+            _append_task_event(task_id, "login", 18, "已检测到 Boss 登录态，继续搜索。")
+            return
+        time.sleep(2)
+
+    raise RuntimeError("等待 Boss 登录超时，请重新发起搜索并点击“打开 Boss 登录页”完成登录。")
+
+
 def _run_search_task(task_id: str) -> None:
     acquired = SEARCH_RUN_LOCK.acquire(blocking=False)
     if not acquired:
@@ -672,18 +857,24 @@ def _run_search_task(task_id: str) -> None:
 
     try:
         _append_task_event(task_id, "starting", 4, "Agent 线程已启动，正在准备搜索环境。")
+        _wait_for_boss_login(task_id)
         result = _run_job_search_with_progress(
             keywords=request["keywords"],
             city=request["city"],
             threshold=request["threshold"],
             user_query=request["user_query"],
             progress=lambda stage, pct, msg: _append_task_event(task_id, stage, pct, msg),
+            login_wait_callback=lambda previous_stamp=None: _wait_for_boss_login(
+                task_id,
+                require_state_change=previous_stamp is not None,
+                previous_stamp=previous_stamp,
+            ),
             login_screenshot_callback=lambda image: _update_task_login_screenshot(task_id, image),
             login_started_callback=lambda: _append_task_event(
                 task_id,
                 "login",
                 20,
-                "正在打开 Boss 登录页。请在弹出的 Chrome 窗口或下方二维码处扫码登录。",
+                "Boss 登录态失效。请点击任务中的“打开 Boss 登录页”，并在浏览器里手动完成登录。",
             ),
         )
         update_search_task(
@@ -734,6 +925,7 @@ def _run_job_search_with_progress(
     threshold: int,
     user_query: str,
     progress,
+    login_wait_callback=None,
     login_screenshot_callback=None,
     login_started_callback=None,
 ) -> JobSearchResponse:
@@ -769,10 +961,18 @@ def _run_job_search_with_progress(
     progress("planning", 8, f"解析搜索意图: {city} · {', '.join(keywords)}")
     apply_update(plan_node(state))
 
-    progress("scraping", 18, "打开 Boss 并检索岗位。若登录态失效，请在弹出的浏览器中扫码。")
+    progress("scraping", 18, "打开 Boss 并检索岗位。若登录态失效，任务会提示你手动登录。")
+    previous_stamp = _boss_state_stamp()
     scrape_update = scrape_node(state)
     apply_update(scrape_update)
     scrape_error = scrape_update.get("scrape_error", "")
+    if scrape_error == "login_required" and login_wait_callback:
+        progress("login", 20, "Boss 登录态失效。请点击任务中的“打开 Boss 登录页”，并在浏览器里手动完成登录。")
+        login_wait_callback(previous_stamp)
+        progress("scraping", 24, "已检测到新的 Boss 登录态，正在重新检索岗位。")
+        scrape_update = scrape_node(state)
+        apply_update(scrape_update)
+        scrape_error = scrape_update.get("scrape_error", "")
     if scrape_error == "no_jobs_found":
         progress("scraping", 22, "Boss 未返回岗位，可能登录失效或页面结构变化。请检查 data/debug/ 调试产物。")
     elif scrape_error:
@@ -1112,7 +1312,7 @@ def _update_task_login_screenshot(task_id: str, image: bytes) -> None:
         status="running",
         stage="login",
         progress=max(int(current.get("progress", 0)), 20),
-        message="等待 Boss 扫码登录。请扫描下方二维码，登录成功后任务会继续。",
+        message="等待 Boss 登录。请在浏览器中手动完成登录，登录成功后任务会继续。",
         screenshot_path=str(path),
     )
 

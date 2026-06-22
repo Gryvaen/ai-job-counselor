@@ -3,6 +3,8 @@
 *.pyo
 .env
 data/boss_state.json
+data/boss_chrome_profile/
 data/jobmatch.db
+data/task_screenshots/
 storage/vector_store
 data/resume_versions/

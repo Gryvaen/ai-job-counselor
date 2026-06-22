@@ -67,17 +67,26 @@ class BossScraper:
                         nonlocal last_page
                         last_page = page
                         if await self._is_login_required(page):
+                            await self._save_debug(page, keyword, city, pg, "login_required")
                             raise LoginRequiredError("Boss login is required before searching jobs.")
                         if await self._is_blocked(page):
+                            await self._save_debug(page, keyword, city, pg, "blocked")
                             page_url = page.url or ""
                             if "_security_check" in page_url or "/verify" in page_url:
                                 raise SecurityCheckPending(page_url)
                             raise BlockedPageError(page_url or url)
-                        await page.wait_for_selector(
-                            ".job-list li, .search-job-result li",
-                            timeout=8000,
-                        )
-                        return await parse_job_list(page)
+                        try:
+                            await page.wait_for_selector(
+                                ".job-card-wrapper, li.job-card, .job-list li, .search-job-result li, .job-empty-wrapper, .empty-tip",
+                                timeout=12000,
+                            )
+                        except Exception:
+                            await self._save_debug(page, keyword, city, pg, "selector_timeout")
+                            raise
+                        jobs = await parse_job_list(page)
+                        if not jobs:
+                            await self._save_debug(page, keyword, city, pg, "zero_jobs")
+                        return jobs
 
                     page_jobs = await self.session.run_with_page(
                         url,
@@ -95,14 +104,14 @@ class BossScraper:
                         continue
                     if last_page:
                         await self._save_debug(last_page, keyword, city, pg, "security_check")
-                    break
+                    raise
                 except LoginRequiredError:
                     raise
                 except BlockedPageError as exc:
                     logger.warning("[scraper] Blocked by anti-scraping at %s", exc.url)
                     if last_page:
                         await self._save_debug(last_page, keyword, city, pg, "blocked")
-                    break
+                    raise
                 except Exception as e:
                     logger.warning(
                         "[scraper] Search failed for page %d attempt %d: %s",
@@ -119,9 +128,6 @@ class BossScraper:
             if len(page_jobs) == 0:
                 break
             await asyncio.sleep(delay)
-
-        if not all_jobs and last_page:
-            await self._save_debug(last_page, keyword, city, 0, "zero_jobs")
 
         logger.info("[scraper] Scraped %d jobs for keyword '%s'", len(all_jobs), keyword)
         return all_jobs
@@ -171,6 +177,9 @@ class BossScraper:
             if "_security_check" in url or "/verify" in url:
                 return True
             title = await page.title()
+            content = await page.content()
+            if any(w in content for w in ("访问受限", "IP 存在异常", "暂时无法访问", "请勿频繁提交刷新请求")):
+                return True
             if any(w in title for w in ("验证", "verify", "captcha", "安全检查")):
                 return True
             if "verify" in url:
