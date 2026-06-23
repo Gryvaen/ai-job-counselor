@@ -157,22 +157,35 @@ function renderChips(items, cls = "chip") {
   return `<div class="chips">${items.map((s) => `<span class="${cls}">${s}</span>`).join("")}</div>`;
 }
 
+function renderRow(label, content) {
+  return `
+    <div class="result-row">
+      <h3 class="result-label">${label}</h3>
+      <div class="result-value">${content}</div>
+    </div>`;
+}
+
 function renderJob(job) {
   if (!job) return "<p class='muted'>暂无数据</p>";
+  const responsibilities = `<ul>${(job.responsibilities || []).map((r) => `<li>${r}</li>`).join("")}</ul>`;
   return `
-    <p class="role-title">${job.title}</p>
-    <p class="muted">${job.seniority} · ${job.summary || ""}</p>
-    <h3>核心技能</h3>${renderChips(job.key_skills)}
-    <h3>典型职责</h3>
-    <ul>${(job.responsibilities || []).map((r) => `<li>${r}</li>`).join("")}</ul>
+    <div class="result-hero">
+      <p class="role-title">${job.title}</p>
+      <p class="muted">${job.seniority} · ${job.summary || ""}</p>
+    </div>
+    ${renderRow("核心技能", renderChips(job.key_skills))}
+    ${renderRow("典型职责", responsibilities)}
   `;
 }
 
 function renderGap(data) {
+  const summary = data.gap_summary
+    ? `<div class="result-hero"><p>${data.gap_summary}</p></div>`
+    : "";
   return `
-    <p>${data.gap_summary || ""}</p>
-    <h3>已匹配</h3>${renderChips(data.matched_skills, "chip match")}
-    <h3>待补充</h3>${renderChips(data.skills_missing, "chip gap")}
+    ${summary}
+    ${renderRow("已匹配", renderChips(data.matched_skills, "chip match"))}
+    ${renderRow("待补充", renderChips(data.skills_missing, "chip gap"))}
   `;
 }
 
@@ -181,10 +194,15 @@ function renderPlan(items) {
   return items
     .map(
       (item) => `
-    <div class="plan-item">
-      <div class="plan-head"><strong>${item.skill}</strong><span>${item.duration}</span></div>
-      <ul>${(item.tasks || []).map((t) => `<li>${t}</li>`).join("")}</ul>
-      ${item.resources?.length ? `<p class="muted">资源：${item.resources.join(" · ")}</p>` : ""}
+    <div class="result-row plan-row">
+      <div class="result-label">
+        <strong>${item.skill}</strong>
+        <span class="result-meta">${item.duration}</span>
+      </div>
+      <div class="result-value">
+        <ul>${(item.tasks || []).map((t) => `<li>${t}</li>`).join("")}</ul>
+        ${item.resources?.length ? `<p class="muted">资源：${item.resources.join(" · ")}</p>` : ""}
+      </div>
     </div>`
     )
     .join("");
@@ -195,10 +213,15 @@ function renderProjects(items) {
   return items
     .map(
       (p) => `
-    <div class="project-item">
-      <div class="plan-head"><strong>${p.title}</strong><span>${p.difficulty}</span></div>
-      <p>${p.description}</p>
-      ${renderChips(p.skills, "chip")}
+    <div class="result-row project-row">
+      <div class="result-label">
+        <strong>${p.title}</strong>
+        <span class="result-meta">${p.difficulty}</span>
+      </div>
+      <div class="result-value">
+        <p>${p.description}</p>
+        ${renderChips(p.skills, "chip")}
+      </div>
     </div>`
     )
     .join("");
