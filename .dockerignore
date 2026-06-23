@@ -4,11 +4,4 @@ __pycache__
 *.pyc
 .pytest_cache
 .env
-data/boss_state.json
-data/boss_chrome_profile
-data/boss_chrome_profile.old-*
-data/jobmatch.db
-data/resume_versions
-data/task_screenshots
-storage/vector_store
-jobmatch_agent.egg-info
+*.egg-info

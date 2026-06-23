@@ -3,9 +3,8 @@
 from fastapi import APIRouter
 
 from agent.graph import build_counselor_graph
-from api.schemas import ConsultRequest, CounselorResponse
 from config.llm import list_available_models, use_model
-from models.counselor import CounselorState
+from models.counselor import ConsultRequest, CounselorResponse, CounselorState
 
 router = APIRouter()
 
