@@ -1,19 +1,13 @@
 [project]
-name = "ai-agent-interview-bot"
-version = "0.1.0"
-description = "AI Agent interview bot with resume context, multi-round technical probing, scoring, and coverage tracking"
+name = "ai-job-counselor"
+version = "1.0.0"
+description = "AI Job Counselor — LangGraph agent for job analysis, skill gaps, and learning plans"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "langgraph>=0.2.0",
     "openai>=1.0.0",
-    "chromadb>=0.5.0,<0.6.0",
-    "tiktoken>=0.7.0",
-    "rich>=13.0.0",
-    "sqlalchemy>=2.0.0",
-    "httpx>=0.27.0",
-    "pyyaml>=6.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
 ]
@@ -26,4 +20,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["config*", "models*", "storage*", "rag*", "agent*", "crews*", "scripts*", "tests*", "api*"]
+include = ["config*", "models*", "agent*", "api*", "tests*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -1,14 +1,19 @@
-from models.job import Job
-from models.match import MatchResult
-from models.resume import ResumeBullet, OptimizedResume
-from models.optimizer import LearningPlan
-from models.agent_state import AgentState
+from models.counselor import (
+    ConsultRequest,
+    CounselorResponse,
+    CounselorState,
+    JobProfile,
+    LearningItem,
+    ProjectRecommendation,
+    SkillGap,
+)
 
 __all__ = [
-    "Job",
-    "MatchResult",
-    "ResumeBullet",
-    "OptimizedResume",
-    "LearningPlan",
-    "AgentState",
+    "ConsultRequest",
+    "CounselorResponse",
+    "CounselorState",
+    "JobProfile",
+    "LearningItem",
+    "ProjectRecommendation",
+    "SkillGap",
 ]

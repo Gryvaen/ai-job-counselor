@@ -1,4 +1,4 @@
-"""Central logging configuration for JobMatch Agent."""
+"""Central logging configuration."""
 
 import logging
 import sys

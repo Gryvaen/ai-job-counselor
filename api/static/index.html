@@ -3,164 +3,275 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#102019" />
-    <title>AI Agent 面试机器人</title>
+    <meta name="theme-color" content="#171717" />
+    <title>AI 求职顾问</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <div class="brand">
-          <span class="brand-mark">AI</span>
-          <div>
-            <strong>AI Agent 面试机器人</strong>
-            <small>Agent 技术栈模拟面试</small>
+    <div class="app">
+      <!-- Sidebar -->
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+          <div class="brand">
+            <div class="brand-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                <path d="M2 17l10 5 10-5" />
+                <path d="M2 12l10 5 10-5" />
+              </svg>
+            </div>
+            <div class="brand-text">
+              <strong>AI 求职顾问</strong>
+              <small>Career Counselor</small>
+            </div>
           </div>
+          <button id="sidebarClose" class="icon-btn sidebar-close" aria-label="关闭侧边栏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
         </div>
 
-        <nav class="nav" aria-label="主导航">
-          <button class="nav-item active" data-view="resume" type="button"><span>候选人档案</span><small>Profile</small></button>
-          <button class="nav-item" data-view="interview" type="button"><span>Agent 面试</span><small>Interview</small></button>
+        <nav class="sidebar-nav">
+          <p class="nav-label">分析流程</p>
+          <ol id="sidebarSteps" class="step-list">
+            <li class="step-item" data-step="job_analyzer">
+              <span class="step-badge">1</span>
+              <div>
+                <span class="step-name">岗位分析</span>
+                <span class="step-desc">解读目标岗位</span>
+              </div>
+            </li>
+            <li class="step-item" data-step="skill_gap_analyzer">
+              <span class="step-badge">2</span>
+              <div>
+                <span class="step-name">技能缺口</span>
+                <span class="step-desc">对比简历与 JD</span>
+              </div>
+            </li>
+            <li class="step-item" data-step="learning_planner">
+              <span class="step-badge">3</span>
+              <div>
+                <span class="step-name">学习路线</span>
+                <span class="step-desc">制定提升计划</span>
+              </div>
+            </li>
+            <li class="step-item" data-step="project_recommender">
+              <span class="step-badge">4</span>
+              <div>
+                <span class="step-name">项目推荐</span>
+                <span class="step-desc">实战项目建议</span>
+              </div>
+            </li>
+          </ol>
         </nav>
 
-        <div class="sidebar-status">
-          <div class="system-card">
-            <span id="healthDot" class="dot"></span>
-            <div>
-              <strong id="healthText">checking</strong>
-              <small id="healthMeta">正在连接后端</small>
-            </div>
+        <div class="sidebar-footer">
+          <div class="tech-stack">
+            <span class="tag">LangGraph</span>
+            <span class="tag">Ollama</span>
+            <span class="tag">FastAPI</span>
           </div>
         </div>
       </aside>
 
+      <div id="sidebarOverlay" class="sidebar-overlay hidden"></div>
+
+      <!-- Main -->
       <main class="main">
-        <header class="topbar">
-          <div>
-            <p class="eyebrow">Personal AI Job Agent</p>
-            <h1 id="pageTitle">候选人档案</h1>
+        <header class="navbar">
+          <button id="sidebarToggle" class="icon-btn" aria-label="打开侧边栏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 12h18M3 6h18M3 18h18" />
+            </svg>
+          </button>
+
+          <div class="navbar-center">
+            <label id="modelField" class="model-selector hidden">
+              <svg class="model-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+              </svg>
+              <select name="model" id="modelSelect">
+                <option value="">加载中...</option>
+              </select>
+            </label>
+            <small id="modelHint" class="model-hint hidden"></small>
           </div>
-          <div class="top-actions">
-            <button id="refreshBtn" class="secondary-btn" type="button">刷新</button>
-            <button data-view-jump="interview" type="button">开始模拟面试</button>
+
+          <div class="navbar-right">
+            <div class="health-badge" id="healthBadge">
+              <span id="healthDot" class="dot"></span>
+              <span id="healthText">checking</span>
+            </div>
           </div>
         </header>
 
-        <section id="notice" class="notice hidden"></section>
+        <div class="workspace">
+          <section id="notice" class="notice hidden"></section>
 
-        <section id="resume" class="view active">
-          <div class="hero-panel">
-            <div>
-              <p class="eyebrow">Resume Builder</p>
-              <h2>把技能、项目和证据整理成 AI Agent 面试上下文。</h2>
-              <p>先生成一份可用的候选人档案，再进入模拟面试。面试官会围绕 Agent 编排、RAG、工具调用、记忆、评估、安全和部署连续追问。</p>
+          <!-- Welcome / Input -->
+          <section id="inputSection" class="input-section">
+            <div class="welcome">
+              <h1>告诉我你的求职目标</h1>
+              <p class="welcome-sub">输入目标岗位，可选附上简历与 JD，获取个性化分析与学习路线</p>
             </div>
-          </div>
 
-          <div class="workspace-grid">
-            <form id="resumeForm" class="panel form-panel">
-              <div class="section-head">
-                <div>
-                  <p class="section-kicker">Input</p>
-                  <h2>候选人信息</h2>
+            <form id="consultForm" class="consult-form">
+              <div class="form-primary">
+                <label class="field field-main">
+                  <span class="field-label">目标岗位</span>
+                  <input
+                    name="user_query"
+                    required
+                    placeholder="例如：我想找 AI Agent 方向的实习岗位"
+                    autocomplete="off"
+                  />
+                </label>
+                <button id="submitBtn" type="submit" class="submit-btn">
+                  <span class="btn-text">开始分析</span>
+                  <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M5 12h14M12 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </div>
+
+              <details class="form-extra">
+                <summary>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  补充简历与 JD（可选，提升分析精度）
+                </summary>
+                <div class="extra-fields">
+                  <label class="field">
+                    <span class="field-label">简历 / 技能</span>
+                    <textarea
+                      name="resume_text"
+                      rows="4"
+                      placeholder="Python, FastAPI, 做过 RAG 项目..."
+                    ></textarea>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">岗位 JD</span>
+                    <textarea
+                      name="jd_text"
+                      rows="4"
+                      placeholder="粘贴 JD 可获得更精准的技能缺口分析"
+                    ></textarea>
+                  </label>
                 </div>
-                <button id="generateResumeBtn" type="submit">生成候选人档案</button>
-              </div>
-
-              <div class="field-grid">
-                <label><span>姓名</span><input name="name" placeholder="你的姓名" /></label>
-                <label><span>目标岗位</span><input name="target_role" required placeholder="AI Agent 工程师" /></label>
-                <label><span>邮箱</span><input name="email" placeholder="you@example.com" /></label>
-                <label><span>电话</span><input name="phone" placeholder="13800000000" /></label>
-                <label><span>城市</span><input name="location" placeholder="上海" /></label>
-                <label><span>GitHub 主页</span><input name="github_url" placeholder="https://github.com/yourname" /></label>
-              </div>
-
-              <label><span>技能，一行一个或逗号分隔</span><textarea name="skills" rows="5" placeholder="Python, FastAPI, LangGraph, RAG, Docker"></textarea></label>
-              <label><span>项目经历，每行一个项目</span><textarea name="projects" rows="8" placeholder="AI 面试官系统：基于 FastAPI + LLM 实现多轮追问、反馈和会话状态管理"></textarea></label>
-              <label><span>补充亮点</span><textarea name="notes" rows="4" placeholder="竞赛、开源、论文、实习成果、量化指标等"></textarea></label>
+              </details>
             </form>
 
-            <section class="panel detail-panel">
-              <div class="section-head compact">
-                <div>
-                  <p class="section-kicker">Preview</p>
-                  <h2>生成结果</h2>
-                </div>
-                <button id="copyResumeBtn" class="secondary-btn" type="button">复制 Markdown</button>
-              </div>
-              <pre id="resumePreview" class="markdown-preview">生成后会在这里预览 Markdown 候选人档案。</pre>
-              <div id="resumeGaps" class="gap-list"></div>
-            </section>
-          </div>
-        </section>
-
-        <section id="interview" class="view">
-          <div class="hero-panel interview-hero">
-            <div>
-              <p class="eyebrow">AI Agent Interviewer</p>
-              <h2>按真实 AI Agent 岗位能力图谱连续追问。</h2>
-              <p>系统会覆盖 LLM 应用、Agent 编排、RAG、工具调用、记忆、评估安全和工程化部署，并给出每轮评分与答题结构。</p>
+            <div class="quick-tips">
+              <button type="button" class="tip-chip" data-query="我想找 AI Agent 工程师实习">
+                AI Agent 实习
+              </button>
+              <button type="button" class="tip-chip" data-query="后端开发工程师，熟悉 Python 和 Go">
+                后端开发
+              </button>
+              <button type="button" class="tip-chip" data-query="大模型应用开发，有 RAG 项目经验">
+                大模型应用
+              </button>
             </div>
-          </div>
+          </section>
 
-          <div class="interview-layout">
-            <form id="interviewSetupForm" class="panel form-panel">
-              <div class="section-head">
-                <div>
-                  <p class="section-kicker">Setup</p>
-                  <h2>面试背景</h2>
-                </div>
-                <button id="startInterviewBtn" type="submit">开始面试</button>
+          <!-- Pipeline (horizontal, shown during analysis) -->
+          <section id="pipeline" class="pipeline-bar hidden">
+            <div class="pipeline-inner">
+              <div class="step" data-step="job_analyzer"><span class="step-icon">1</span>岗位分析</div>
+              <div class="step-arrow">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
               </div>
-              <label><span>目标岗位</span><input name="target_role" required placeholder="AI Agent 工程师" /></label>
-              <label><span>技能栈</span><textarea name="skills" rows="5" placeholder="Python, RAG, LangGraph, SQL, Docker"></textarea></label>
-              <label><span>项目经历</span><textarea name="projects" rows="8" placeholder="项目名：你的职责、技术方案、难点和结果"></textarea></label>
-            </form>
+              <div class="step" data-step="skill_gap_analyzer"><span class="step-icon">2</span>技能缺口</div>
+              <div class="step-arrow">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
+              </div>
+              <div class="step" data-step="learning_planner"><span class="step-icon">3</span>学习路线</div>
+              <div class="step-arrow">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
+              </div>
+              <div class="step" data-step="project_recommender"><span class="step-icon">4</span>项目推荐</div>
+            </div>
+          </section>
 
-            <section class="panel chat-panel">
-              <div class="section-head compact">
-                <div>
-                  <p class="section-kicker">Interview</p>
-                  <h2>模拟面试</h2>
+          <!-- Results -->
+          <section id="results" class="results hidden">
+            <div class="results-header">
+              <h2>分析结果</h2>
+              <button id="newConsultBtn" type="button" class="ghost-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                新建分析
+              </button>
+            </div>
+
+            <div class="results-tabs">
+              <button class="tab active" data-tab="job">岗位分析</button>
+              <button class="tab" data-tab="gap">技能缺口</button>
+              <button class="tab" data-tab="plan">学习路线</button>
+              <button class="tab" data-tab="projects">项目推荐</button>
+            </div>
+
+            <div class="results-panels">
+              <article class="result-panel active" id="panelJob">
+                <div class="panel-icon job-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="2" y="7" width="20" height="14" rx="2" />
+                    <path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2" />
+                  </svg>
                 </div>
-                <button id="resetInterviewBtn" class="secondary-btn" type="button">重置</button>
-              </div>
-              <div id="interviewLog" class="chat-log">
-                <div class="message agent">填写左侧背景后开始面试。我会先确认项目真实性，再追问 Agent 编排、RAG、工具调用、评估安全和部署。</div>
-              </div>
-              <aside id="interviewCoach" class="interview-coach">
-                <div>
-                  <span>阶段</span>
-                  <strong id="stageLabel">待开始</strong>
+                <div id="jobContent" class="panel-body"></div>
+              </article>
+              <article class="result-panel" id="panelGap">
+                <div class="panel-icon gap-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M9 11l3 3L22 4" />
+                    <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+                  </svg>
                 </div>
-                <div>
-                  <span>上一轮评分</span>
-                  <strong id="scoreLabel">--</strong>
+                <div id="gapContent" class="panel-body"></div>
+              </article>
+              <article class="result-panel" id="panelPlan">
+                <div class="panel-icon plan-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z" />
+                    <path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z" />
+                  </svg>
                 </div>
-                <div>
-                  <span>答题结构</span>
-                  <div id="answerShape" class="mini-list"></div>
+                <div id="planContent" class="panel-body"></div>
+              </article>
+              <article class="result-panel" id="panelProjects">
+                <div class="panel-icon project-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                  </svg>
                 </div>
-                <div>
-                  <span>能力覆盖</span>
-                  <div id="coverageList" class="coverage-list"></div>
-                </div>
-                <div>
-                  <span>评分标准</span>
-                  <div id="rubricList" class="mini-list"></div>
-                </div>
-              </aside>
-              <form id="answerForm" class="chat-form">
-                <textarea name="answer" rows="3" placeholder="在这里回答当前问题"></textarea>
-                <button id="sendAnswerBtn" type="submit">提交回答</button>
-              </form>
-            </section>
-          </div>
-        </section>
+                <div id="projectsContent" class="panel-body"></div>
+              </article>
+            </div>
+
+            <details class="json-panel">
+              <summary>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M16 18l6-6-6-6M8 6l-6 6 6 6" />
+                </svg>
+                查看原始 JSON
+              </summary>
+              <pre id="jsonOutput"></pre>
+            </details>
+          </section>
+        </div>
       </main>
     </div>
-
     <script src="/static/app.js"></script>
   </body>
 </html>

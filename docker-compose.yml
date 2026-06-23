@@ -1,7 +1,7 @@
 services:
   ollama:
     image: ollama/ollama:latest
-    container_name: jobmatch-ollama
+    container_name: job-counselor-ollama
     ports:
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
@@ -12,16 +12,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: jobmatch-webui
+    container_name: job-counselor-webui
     ports:
-      - "${WEBUI_PORT:-8000}:8000"
-    environment:
-      MODEL_PROVIDER: ${MODEL_PROVIDER:-ollama}
-      OLLAMA_BASE_URL: http://ollama:11434/v1
-    volumes:
-      - ./data:/app/data
-      - ./storage:/app/storage
-      - ./.env:/app/.env
+      - "${WEBUI_PORT:-8001}:8001"
+    env_file:
+      - .env
     depends_on:
       - ollama
     restart: unless-stopped
