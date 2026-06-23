@@ -1,26 +1,49 @@
+# -----------------------------
+# 项目主配置信息: [project] 节定义基础元数据
+# -----------------------------
 [project]
-name = "ai-job-counselor"
-version = "1.0.0"
-description = "AI Job Counselor — LangGraph agent for job analysis, skill gaps, and learning plans"
-requires-python = ">=3.11"
+name = "ai-job-counselor"  # 项目名称
+version = "1.0.0"  # 项目当前版本
+description = "AI Job Counselor — LangGraph agent for job analysis, skill gaps, and learning plans"  # 项目描述
+requires-python = ">=3.11"  # 要求 Python 3.11 及以上版本
+
+# 项目运行所需的主依赖列表
+# 修改依赖时需同步更新 requirements.txt
 dependencies = [
-    "pydantic>=2.0",
-    "pydantic-settings>=2.0",
-    "langgraph>=0.2.0",
-    "openai>=1.0.0",
-    "fastapi>=0.115.0",
-    "uvicorn>=0.30.0",
+    "pydantic>=2.0",            # 数据建模与校验
+    "pydantic-settings>=2.0",   # 配置管理（基于 Pydantic）
+    "langgraph>=0.2.0",         # LangGraph agent 支持
+    "openai>=1.0.0",            # 与 OpenAI API 对接（如嵌入、LLM 等）
+    "fastapi>=0.115.0",         # Web API 框架
+    "uvicorn>=0.30.0",          # FastAPI 推荐 ASGI 服务器
 ]
 
+# -----------------------------
+# 项目可选依赖: [project.optional-dependencies] 
+# dev 分组用于开发环境（如测试）
+# -----------------------------
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "httpx>=0.27.0",
+    "pytest>=8.0.0",            # 单元测试框架
+    "pytest-asyncio>=0.24.0",   # 支持异步测试
+    "httpx>=0.27.0",            # 异步 HTTP 客户端，测试 HTTP 接口用
 ]
 
+# -----------------------------
+# setuptools 包发现配置
+# 指定要包含进分发包的自定义目录模式
+# -----------------------------
 [tool.setuptools.packages.find]
-include = ["config*", "models*", "agent*", "api*", "tests*"]
+include = [
+    "config*",   # 配置相关包
+    "models*",   # 数据模型相关包
+    "agent*",    # 智能体相关包
+    "api*",      # API 层相关包
+    "tests*",    # 测试相关包
+]
 
+# -----------------------------
+# pytest 配置（用于自动异步支持）
+# -----------------------------
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
+asyncio_mode = "auto"  # pytest 自动侦测 asyncio 测试模式
